@@ -8,7 +8,7 @@ export class AuthProvider {
   @PrimaryGeneratedColumn('uuid')
   id: string;
 
-  @Column({type:'enum', enum: AuthProviderType})
+  @Column({ type: 'varchar', length: 32 })
   provider: AuthProviderType;
 
   @Column()

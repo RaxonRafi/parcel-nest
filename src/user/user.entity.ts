@@ -24,7 +24,7 @@ import { IsActive, Role } from './user.interface';
     @Column({ nullable: true })
     password: string;
   
-    @Column({ type: 'enum', enum: Role, default: Role.SENDER })
+    @Column({ type: 'varchar', length: 32, default: Role.SENDER })
     role: Role;
   
     @Column({ nullable: true })
@@ -39,7 +39,7 @@ import { IsActive, Role } from './user.interface';
     @Column({ default: false })
     isDeleted: boolean;
   
-    @Column({ type: 'enum', enum: IsActive, default: IsActive.ACTIVE })
+    @Column({ type: 'varchar', length: 32, default: IsActive.ACTIVE })
     isActive: IsActive;
   
     @Column({ default: false })
@@ -48,7 +48,7 @@ import { IsActive, Role } from './user.interface';
     @Column({ nullable: true, unique: true })
     nidNumber: string;
   
-    @Column({ type: 'text', array: true, default: [] })
+    @Column({ type: 'simple-array', default: '' })
     nidImage: string[];
   
     @OneToMany(() => AuthProvider, (auth) => auth.user, {
