@@ -1,8 +1,9 @@
 export class CreateParcelDto {
-  receiverId: string;
-  receiverName: string;
+  receiverId!: string;
+  receiverName!: string;
   receiverPhone?: string;
-  pickupAddress: string;
-  deliveryAddress: string;
+  receiverEmail!: string;
+  pickupAddress!: string;
+  deliveryAddress!: string;
   description?: string;
 }

@@ -7,7 +7,7 @@ import {
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { User } from '../user/user.entity';
-import { Role } from '../user/user.interface';
+import { IsActive, Role } from '../user/user.interface';
 import { CreateParcelDto } from './dto/create-parcel.dto';
 import { UpdateParcelStatusDto } from './dto/update-parcel-status.dto';
 import { ParcelStatusLog } from './parcel-status-log.entity';
@@ -25,42 +25,51 @@ export class ParcelService {
     private readonly userRepository: Repository<User>,
   ) {}
 
-  async create(sender: User, payload: CreateParcelDto): Promise<Parcel> {
-    if (sender.role !== Role.SENDER && sender.role !== Role.ADMIN) {
-      throw new ForbiddenException('Only senders can create parcels');
-    }
-
-    const receiver = await this.userRepository.findOne({
-      where: { id: payload.receiverId, isDeleted: false },
-    });
-
-    if (!receiver) {
-      throw new NotFoundException('Receiver not found');
-    }
-
-    const parcel = this.parcelRepository.create({
-      trackingId: this.generateTrackingId(),
-      sender,
-      receiver,
-      senderName: sender.name,
-      receiverName: payload.receiverName,
-      senderPhone: sender.phone,
-      receiverPhone: payload.receiverPhone,
-      pickupAddress: payload.pickupAddress,
-      deliveryAddress: payload.deliveryAddress,
-      description: payload.description,
-      status: ParcelStatus.PENDING,
-      statusLogs: [
-        {
-          status: ParcelStatus.PENDING,
-          note: 'Parcel created',
-          changedBy: sender,
-        },
-      ],
-    });
-
-    return this.parcelRepository.save(parcel);
+async create(sender: User, payload: CreateParcelDto): Promise<Parcel> {
+  if (sender.role !== Role.SENDER && sender.role !== Role.ADMIN) {
+    throw new ForbiddenException('Only senders can create parcels');
   }
+
+  let receiver = await this.userRepository.findOne({
+    where: { email: payload.receiverEmail, isDeleted: false },
+  });
+
+  if (!receiver) {
+    receiver = this.userRepository.create({
+      name: payload.receiverName,
+      email: payload.receiverEmail,
+      phone: payload.receiverPhone,
+      role: Role.RECEIVER,
+      isVerified: false,
+      isActive: IsActive.ACTIVE,
+      isDeleted: false,
+    });
+    receiver = await this.userRepository.save(receiver);
+  }
+
+  const parcel = this.parcelRepository.create({
+    trackingId: this.generateTrackingId(),
+    sender,
+    receiver,
+    senderName: sender.name,
+    receiverName: payload.receiverName,
+    senderPhone: sender.phone,
+    receiverPhone: payload.receiverPhone,
+    pickupAddress: payload.pickupAddress,
+    deliveryAddress: payload.deliveryAddress,
+    description: payload.description,
+    status: ParcelStatus.PENDING,
+    statusLogs: [
+      {
+        status: ParcelStatus.PENDING,
+        note: 'Parcel created',
+        changedBy: sender,
+      },
+    ],
+  });
+
+  return this.parcelRepository.save(parcel);
+}
 
   async updateStatus(
     trackingId: string,

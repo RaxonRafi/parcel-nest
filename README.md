@@ -1,3 +1,21 @@
+## 🖥️ Frontend (Next.js)
+
+The SwiftParcel UI lives in [`percel-client/`](./percel-client/) — landing page + dashboard from `design-reference/swiftparcel.html`.
+
+```bash
+cd percel-client && npm install && npm run dev
+```
+
+Set the API URL in `percel-client/.env.local`:
+
+```env
+NEXT_PUBLIC_API_BASE_URL=http://localhost:3000/api
+```
+
+Change this after deployment (e.g. `https://api.yourdomain.com/api`). Client runs on **http://localhost:3001**, API on **http://localhost:3000**.
+
+---
+
 ## 🧪 Automated API Tests
 
 E2E tests cover every endpoint below using an in-memory SQLite database (no live Supabase required).

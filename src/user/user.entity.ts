@@ -13,53 +13,53 @@ import { IsActive, Role } from './user.interface';
   @Entity('users')
   export class User {
     @PrimaryGeneratedColumn('uuid')
-    id: string;
+    id!: string;
   
     @Column()
-    name: string;
+    name!: string;
   
     @Column({ unique: true })
-    email: string;
+    email!: string;
   
     @Column({ nullable: true })
-    password: string;
+    password!: string;
   
     @Column({ type: 'varchar', length: 32, default: Role.SENDER })
-    role: Role;
+    role!: Role;
   
     @Column({ nullable: true })
-    phone: string;
+    phone!: string;
   
     @Column({ nullable: true })
-    picture: string;
+    picture!: string;
   
     @Column({ nullable: true })
-    address: string;
+    address!: string;
   
     @Column({ default: false })
-    isDeleted: boolean;
+    isDeleted!: boolean;
   
     @Column({ type: 'varchar', length: 32, default: IsActive.ACTIVE })
-    isActive: IsActive;
+    isActive!: IsActive;
   
     @Column({ default: false })
-    isVerified: boolean;
+    isVerified!: boolean;
   
     @Column({ nullable: true, unique: true })
-    nidNumber: string;
+    nidNumber!: string;
   
     @Column({ type: 'simple-array', default: '' })
-    nidImage: string[];
+    nidImage!: string[];
   
     @OneToMany(() => AuthProvider, (auth) => auth.user, {
       cascade: true,
       eager: true,
     })
-    auths: AuthProvider[];
+    auths!: AuthProvider[];
   
     @CreateDateColumn()
-    createdAt: Date;
+    createdAt!: Date;
   
     @UpdateDateColumn()
-    updatedAt: Date;
+    updatedAt!: Date;
   }
