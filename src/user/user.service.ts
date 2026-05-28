@@ -31,6 +31,52 @@ export class UserService {
     private readonly authTokenService: AuthTokenService,
   ) {}
 
+  async seedSuperAdmin(): Promise<void> {
+    const superAdminEmail = this.configService
+      .get<string>('SUPER_ADMIN_EMAIL')
+      ?.toLowerCase()
+      .trim();
+    const superAdminPassword = this.configService.get<string>(
+      'SUPER_ADMIN_PASSWORD',
+    );
+
+    if (!superAdminEmail || !superAdminPassword) {
+      return;
+    }
+
+    const isSuperAdminExist = await this.userRepository.findOne({
+      where: { email: superAdminEmail },
+    });
+
+    if (isSuperAdminExist) {
+      console.log('Super Admin Already Exists!');
+      return;
+    }
+
+    console.log('Trying to create Super Admin...');
+    const hashedPassword = await bcrypt.hash(
+      superAdminPassword,
+      Number(this.configService.getOrThrow<string>('BCRYPT_SALT_ROUND')),
+    );
+
+    const superAdmin = this.userRepository.create({
+      name: 'Super admin',
+      role: Role.ADMIN,
+      email: superAdminEmail,
+      password: hashedPassword,
+      isVerified: true,
+      auths: [
+        {
+          provider: AuthProviderType.CREDENTIALS,
+          providerId: superAdminEmail,
+        },
+      ],
+    });
+
+    await this.userRepository.save(superAdmin);
+    console.log('Super Admin Created Successfully!');
+  }
+
   async register(
     payload: CreateUserDto,
     authorization?: string,
