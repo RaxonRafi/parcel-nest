@@ -14,6 +14,7 @@ async function bootstrap() {
     origin: process.env.CORS_ORIGIN?.split(',') ?? [
       'http://localhost:3001',
       'http://127.0.0.1:3001',
+      'https://percel-client-next.vercel.app'
       
     ],
     credentials: true,
