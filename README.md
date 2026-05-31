@@ -76,3 +76,78 @@ Also available: `npm run test:e2e` (same suite).
 | Method | Endpoint                            | Access        | Description                                   |
 |--------|-------------------------------------|---------------|-----------------------------------------------|
 | GET   | `/api/dashboard/`                     | Admin | Get Dashboard Stats                           |
+
+---
+
+## 🤖 RAG (Retrieval-Augmented Generation)
+
+This project now includes a RAG module for:
+
+- Q&A over uploaded PDF knowledge docs (policy/help content)
+- Q&A over live parcel tracking context
+- Hybrid retrieval using both sources
+
+### ✅ Automatic Parcel Indexing
+
+Parcel records are automatically indexed into the vector store whenever parcel state changes in DB flows:
+
+- Parcel created
+- Parcel status updated
+- Parcel cancelled
+- Parcel delivery confirmed
+- Parcel blocked
+
+This makes queries like "Where is my parcel TRK-1042?" answerable via `/api/rag/ask`.
+
+### 🔧 RAG Environment Variables
+
+Make sure these are configured:
+
+```env
+PINECONE_API_KEY=...
+PINECONE_INDEX=...
+HUGGINGFACE_API_KEY=...
+GROQ_API_KEY=...
+
+# Used by internal parcel->RAG indexing call (optional fallbacks are APP_URL then localhost)
+INTERNAL_API_BASE_URL=http://localhost:5000
+```
+
+### 📚 RAG Routes
+
+| Method | Endpoint                         | Description |
+|--------|----------------------------------|-------------|
+| POST   | `/api/rag/pdf/upload`            | Upload + ingest PDF into vector store |
+| DELETE | `/api/rag/pdf/:source`           | Remove a PDF from vector store |
+| POST   | `/api/rag/ask`                   | Ask a question over retrieved context |
+| POST   | `/api/rag/index/parcel`          | Index one parcel document |
+| POST   | `/api/rag/index/bulk`            | Index many parcels |
+| DELETE | `/api/rag/index/parcel/:id`      | Remove one indexed parcel |
+
+### 💬 Ask Examples
+
+Ask a tracking question (recommended filter):
+
+```http
+POST /api/rag/ask
+Content-Type: application/json
+
+{
+	"question": "Where is my parcel TRK-1042?",
+	"filter": "parcel"
+}
+```
+
+Ask a policy/doc question:
+
+```http
+POST /api/rag/ask
+Content-Type: application/json
+
+{
+	"question": "What is the refund policy for lost parcels?",
+	"filter": "pdf"
+}
+```
+
+Use `"filter": "all"` to search both parcel and PDF context.
