@@ -2,6 +2,7 @@ import {
   BadRequestException,
   ForbiddenException,
   Injectable,
+  Logger,
   NotFoundException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
@@ -16,6 +17,8 @@ import { ParcelStatus } from './parcel.interface';
 
 @Injectable()
 export class ParcelService {
+  private readonly logger = new Logger(ParcelService.name);
+
   constructor(
     @InjectRepository(Parcel)
     private readonly parcelRepository: Repository<Parcel>,
@@ -68,7 +71,11 @@ async create(sender: User, payload: CreateParcelDto): Promise<Parcel> {
     ],
   });
 
-  return this.parcelRepository.save(parcel);
+  const savedParcel = await this.parcelRepository.save(parcel);
+  const freshParcel = await this.getParcelWithLogs(savedParcel.trackingId);
+  await this.triggerParcelIndex(freshParcel);
+
+  return freshParcel;
 }
 
   async updateStatus(
@@ -89,8 +96,10 @@ async create(sender: User, payload: CreateParcelDto): Promise<Parcel> {
     parcel.status = payload.status;
     await this.parcelRepository.save(parcel);
     await this.addStatusLog(parcel, payload.status, admin, payload.note);
+    const updatedParcel = await this.getParcelWithLogs(trackingId);
+    await this.triggerParcelIndex(updatedParcel);
 
-    return this.getParcelWithLogs(trackingId);
+    return updatedParcel;
   }
 
   async cancelParcel(trackingId: string, sender: User): Promise<Parcel> {
@@ -112,8 +121,10 @@ async create(sender: User, payload: CreateParcelDto): Promise<Parcel> {
       sender,
       'Cancelled by sender',
     );
+    const updatedParcel = await this.getParcelWithLogs(trackingId);
+    await this.triggerParcelIndex(updatedParcel);
 
-    return this.getParcelWithLogs(trackingId);
+    return updatedParcel;
   }
 
   async confirmDelivery(trackingId: string, receiver: User): Promise<Parcel> {
@@ -131,8 +142,10 @@ async create(sender: User, payload: CreateParcelDto): Promise<Parcel> {
       receiver,
       'Delivery confirmed by receiver',
     );
+    const updatedParcel = await this.getParcelWithLogs(trackingId);
+    await this.triggerParcelIndex(updatedParcel);
 
-    return this.getParcelWithLogs(trackingId);
+    return updatedParcel;
   }
 
   async blockParcel(trackingId: string, admin: User): Promise<Parcel> {
@@ -140,7 +153,10 @@ async create(sender: User, payload: CreateParcelDto): Promise<Parcel> {
     parcel.isBlocked = true;
     await this.parcelRepository.save(parcel);
     await this.addStatusLog(parcel, parcel.status, admin, 'Parcel blocked by admin');
-    return this.getParcelWithLogs(trackingId);
+    const updatedParcel = await this.getParcelWithLogs(trackingId);
+    await this.triggerParcelIndex(updatedParcel);
+
+    return updatedParcel;
   }
 
   async getMyParcels(sender: User): Promise<Parcel[]> {
@@ -229,6 +245,43 @@ async create(sender: User, payload: CreateParcelDto): Promise<Parcel> {
       note,
     });
     await this.statusLogRepository.save(log);
+  }
+
+  private async triggerParcelIndex(parcel: Parcel): Promise<void> {
+    const latestNote = parcel.statusLogs?.[parcel.statusLogs.length - 1]?.note;
+    const baseUrl =
+      process.env.INTERNAL_API_BASE_URL ??
+      process.env.APP_URL ??
+      `http://localhost:${process.env.PORT ?? 3000}`;
+
+    try {
+      const response = await fetch(`${baseUrl}/api/rag/index/parcel`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          id: parcel.id,
+          trackingCode: parcel.trackingId,
+          status: parcel.status,
+          origin: parcel.pickupAddress,
+          destination: parcel.deliveryAddress,
+          recipientName: parcel.receiverName,
+          updatedAt: parcel.updatedAt.toISOString(),
+          notes: latestNote,
+        }),
+      });
+
+      if (!response.ok) {
+        const errorBody = await response.text();
+        this.logger.warn(
+          `RAG indexing failed for ${parcel.trackingId}: ${response.status} ${errorBody}`,
+        );
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Unknown error';
+      this.logger.warn(
+        `RAG indexing request failed for ${parcel.trackingId}: ${message}`,
+      );
+    }
   }
 
   private generateTrackingId(): string {

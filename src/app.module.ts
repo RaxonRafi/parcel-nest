@@ -7,6 +7,7 @@ import { UserModule } from './user/user.module';
 import { AuthModule } from './auth/auth.module';
 import { ParcelModule } from './parcel/parcel.module';
 import { DashboardModule } from './dashboard/dashboard.module';
+import { RagModule } from './rag/rag.module';
 
 @Module({
   imports: [
@@ -31,6 +32,7 @@ import { DashboardModule } from './dashboard/dashboard.module';
     AuthModule,
     ParcelModule,
     DashboardModule,
+    RagModule,
   ],
   controllers: [AppController],
   providers: [AppService],

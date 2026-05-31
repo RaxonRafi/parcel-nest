@@ -22,11 +22,20 @@ async function bootstrap() {
     credentials: true,
   });
 
-  await app.init(); // ✅ init() instead of listen()
+  // ✅ Local: listen on port
+  if (process.env.NODE_ENV !== 'production') {
+    await app.listen(process.env.PORT ?? 3000);
+    console.log(`🚀 Server running on http://localhost:${process.env.PORT ?? 3000}/api`);
+  } else {
+    await app.init(); // Vercel serverless
+  }
+
   return app;
 }
 
-// ✅ Required default export for Vercel
+bootstrap();
+
+// ✅ Vercel serverless export
 export default async (req: any, res: any) => {
   const server = await bootstrap();
   const httpAdapter = server.getHttpAdapter().getInstance();
