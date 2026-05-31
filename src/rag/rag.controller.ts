@@ -9,8 +9,9 @@ import {
   BadRequestException,
 } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
-import { diskStorage } from 'multer';
+import multer, { diskStorage } from 'multer';
 import { RagService } from './rag.service';
+import * as fs from 'fs';
 
 @Controller('rag')
 export class RagController {
@@ -21,10 +22,20 @@ export class RagController {
   @Post('pdf/upload')
   @UseInterceptors(
     FileInterceptor('file', {
-      storage: diskStorage({
-        destination: './src/rag/uploads',
-        filename: (_, file, cb) =>
-          cb(null, `${Date.now()}-${file.originalname}`),
+      // storage: diskStorage({
+      //   destination: './src/rag/uploads',
+      //   filename: (_, file, cb) =>
+      //     cb(null, `${Date.now()}-${file.originalname}`),
+      // }),
+       storage: multer.diskStorage({
+        destination: (req, file, cb) => {
+          const uploadDir = '/tmp/uploads';
+          fs.mkdirSync(uploadDir, { recursive: true }); // recursive: true avoids ENOENT if /tmp/uploads doesn't exist
+          cb(null, uploadDir);
+        },
+        filename: (req, file, cb) => {
+          cb(null, `${Date.now()}-${file.originalname}`);
+        },
       }),
       fileFilter: (_, file, cb) => {
         if (file.mimetype !== 'application/pdf') {
@@ -35,12 +46,14 @@ export class RagController {
       limits: { fileSize: 10 * 1024 * 1024 }, // 10MB
     }),
   )
-  async uploadPDF(
-    @UploadedFile() file: Express.Multer.File,
-    @Body() body: { category?: string },
-  ) {
-    if (!file) throw new BadRequestException('No file uploaded');
+  
+async uploadPDF(
+  @UploadedFile() file: Express.Multer.File,
+  @Body() body: { category?: string },
+) {
+  if (!file) throw new BadRequestException('No file uploaded');
 
+  try {
     const result = await this.ragService.ingestPDF(file.path, {
       source: file.originalname,
       category: body.category ?? 'general',
@@ -51,7 +64,13 @@ export class RagController {
       filename: file.originalname,
       ...result,
     };
+  } finally {
+    // Clean up temp file regardless of success or failure
+    fs.unlink(file.path, (err) => {
+      if (err) console.warn(`Failed to delete temp file: ${file.path}`, err);
+    });
   }
+}
 
   // ─── Delete PDF ───────────────────────────────────────────────────────────
 
