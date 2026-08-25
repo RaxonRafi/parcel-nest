@@ -8,6 +8,7 @@ import { AuthModule } from './auth/auth.module';
 import { ParcelModule } from './parcel/parcel.module';
 import { DashboardModule } from './dashboard/dashboard.module';
 import { RagModule } from './rag/rag.module';
+import { KeepAliveModule } from './keep-alive/keep-alive.module';
 
 @Module({
   imports: [
@@ -33,6 +34,7 @@ import { RagModule } from './rag/rag.module';
     ParcelModule,
     DashboardModule,
     RagModule,
+    KeepAliveModule,
   ],
   controllers: [AppController],
   providers: [AppService],

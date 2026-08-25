@@ -11,5 +11,11 @@
       "src": "/(.*)",
       "dest": "src/main.ts"
     }
+  ],
+  "crons": [
+    {
+      "path": "/api/keep-alive",
+      "schedule": "0 3 * * *"
+    }
   ]
 }
