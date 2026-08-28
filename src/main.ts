@@ -1,10 +1,12 @@
+import { INestApplication } from '@nestjs/common';
 import { NestFactory } from '@nestjs/core';
 import { AppModule } from './app.module';
+import { setupSwagger } from './config/swagger.config';
 import { UserService } from './user/services/user.service';
 
-let app;
+let app: INestApplication | undefined;
 
-async function bootstrap() {
+async function bootstrap(): Promise<INestApplication> {
   if (app) return app;
 
   app = await NestFactory.create(AppModule);
@@ -21,12 +23,16 @@ async function bootstrap() {
     ],
     credentials: true,
   });
+  setupSwagger(app);
 
   // ✅ Local: listen on port
   if (process.env.NODE_ENV !== 'production') {
     await app.listen(process.env.PORT ?? 3000);
     console.log(
       `🚀 Server running on http://localhost:${process.env.PORT ?? 3000}/api`,
+    );
+    console.log(
+      `📖 Swagger UI on http://localhost:${process.env.PORT ?? 3000}/api/docs`,
     );
   } else {
     await app.init(); // Vercel serverless

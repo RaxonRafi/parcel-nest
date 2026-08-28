@@ -9,23 +9,45 @@ import {
   UseInterceptors,
 } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
+import {
+  ApiBody,
+  ApiConsumes,
+  ApiOperation,
+  ApiParam,
+  ApiResponse,
+  ApiTags,
+} from '@nestjs/swagger';
 import multer from 'multer';
 import * as fs from 'fs';
 import { AskDto } from '../dto/ask.dto';
 import { IndexBulkDto } from '../dto/index-bulk.dto';
 import { IndexParcelDto } from '../dto/index-parcel.dto';
-import { UploadPdfDto } from '../dto/upload-pdf.dto';
+import {
+  PdfIngestResponseDto,
+  RagAnswerDto,
+  RagMessageResponseDto,
+} from '../dto/rag-response.dto';
+import { UploadPdfDto, UploadPdfFormDto } from '../dto/upload-pdf.dto';
 import { RagService } from '../services/rag.service';
 import { RagAnswer } from '../types/rag.types';
 
 const UPLOAD_DIR = '/tmp/uploads';
 
+@ApiTags('RAG')
 @Controller('rag')
 export class RagController {
   constructor(private readonly ragService: RagService) {}
 
   // ─── Upload & ingest PDF ──────────────────────────────────────────────────
 
+  @ApiOperation({
+    summary: 'Upload a PDF and index it',
+    description: 'PDF only, 10 MB maximum.',
+  })
+  @ApiConsumes('multipart/form-data')
+  @ApiBody({ type: UploadPdfFormDto })
+  @ApiResponse({ status: 201, type: PdfIngestResponseDto })
+  @ApiResponse({ status: 400, description: 'Missing file or non-PDF upload' })
   @Post('pdf/upload')
   @UseInterceptors(
     FileInterceptor('file', {
@@ -75,6 +97,9 @@ export class RagController {
 
   // ─── Delete PDF ───────────────────────────────────────────────────────────
 
+  @ApiOperation({ summary: 'Drop an indexed PDF from the vector store' })
+  @ApiParam({ name: 'source', example: 'delivery-policy.pdf' })
+  @ApiResponse({ status: 200, type: RagMessageResponseDto })
   @Delete('pdf/:source')
   async deletePDF(@Param('source') source: string) {
     await this.ragService.deletePDF(source);
@@ -83,6 +108,9 @@ export class RagController {
 
   // ─── Ask a question ───────────────────────────────────────────────────────
 
+  @ApiOperation({ summary: 'Ask a question over the indexed documents' })
+  @ApiResponse({ status: 201, type: RagAnswerDto })
+  @ApiResponse({ status: 400, description: 'Question is required' })
   @Post('ask')
   ask(@Body() body: AskDto): Promise<RagAnswer> {
     if (!body.question) throw new BadRequestException('Question is required');
@@ -91,6 +119,8 @@ export class RagController {
 
   // ─── Index single parcel ──────────────────────────────────────────────────
 
+  @ApiOperation({ summary: 'Index a single parcel' })
+  @ApiResponse({ status: 201, type: RagMessageResponseDto })
   @Post('index/parcel')
   async indexParcel(@Body() parcel: IndexParcelDto) {
     await this.ragService.indexParcel(parcel);
@@ -99,6 +129,9 @@ export class RagController {
 
   // ─── Bulk index parcels ───────────────────────────────────────────────────
 
+  @ApiOperation({ summary: 'Index many parcels at once' })
+  @ApiResponse({ status: 201, type: RagMessageResponseDto })
+  @ApiResponse({ status: 400, description: 'No parcels provided' })
   @Post('index/bulk')
   async indexBulk(@Body() body: IndexBulkDto) {
     if (!body.parcels?.length) {
@@ -114,6 +147,9 @@ export class RagController {
 
   // ─── Delete parcel ────────────────────────────────────────────────────────
 
+  @ApiOperation({ summary: 'Drop an indexed parcel from the vector store' })
+  @ApiParam({ name: 'id', format: 'uuid' })
+  @ApiResponse({ status: 200, type: RagMessageResponseDto })
   @Delete('index/parcel/:id')
   async deleteParcel(@Param('id') id: string) {
     await this.ragService.deleteParcel(id);

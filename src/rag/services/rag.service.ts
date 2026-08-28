@@ -22,6 +22,9 @@ import {
   RagFilter,
 } from '../types/rag.types';
 
+/** Overridable with the GROQ_MODEL env var. */
+const DEFAULT_GROQ_MODEL = 'openai/gpt-oss-20b';
+
 @Injectable()
 export class RagService implements OnModuleInit {
   private readonly logger = new Logger(RagService.name);
@@ -46,10 +49,13 @@ export class RagService implements OnModuleInit {
       model: 'sentence-transformers/all-MiniLM-L6-v2',
     });
 
-    // Free LLM via Groq
+    // Free LLM via Groq. Groq retires models with little notice (it dropped
+    // `llama-3.1-8b-instant` out from under us), so the id is overridable with
+    // GROQ_MODEL — check https://console.groq.com/docs/models when answers
+    // start failing with `model_not_found`.
     this.llm = new ChatGroq({
       apiKey: this.config.getOrThrow<string>('GROQ_API_KEY'),
-      model: 'llama-3.1-8b-instant',
+      model: this.config.get<string>('GROQ_MODEL') ?? DEFAULT_GROQ_MODEL,
       temperature: 0,
     });
 
