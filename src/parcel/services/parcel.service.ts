@@ -6,7 +6,8 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { In, Not, Repository } from 'typeorm';
+import { firstName } from '../../common/utils/name.util';
 import { User } from '../../user/entities/user.entity';
 import { UserService } from '../../user/services/user.service';
 import { Role } from '../../user/types/user.types';
@@ -14,17 +15,38 @@ import { CreateParcelDto } from '../dto/create-parcel.dto';
 import { UpdateParcelStatusDto } from '../dto/update-parcel-status.dto';
 import { ParcelStatusLog } from '../entities/parcel-status-log.entity';
 import { Parcel } from '../entities/parcel.entity';
+import { toPublicParcel } from '../utils/public-parcel.util';
+import { sanitizeParcel, sanitizeParcels } from '../utils/sanitize-parcel.util';
 import {
   ParcelIndexDocument,
   ParcelStats,
   ParcelStatus,
+  PublicParcel,
 } from '../types/parcel.types';
 
 const PARCEL_RELATIONS = [
   'sender',
   'receiver',
+  'deliveryPersonnel',
   'statusLogs',
   'statusLogs.changedBy',
+];
+
+/**
+ * Statuses a courier may set on a parcel assigned to them. Cancelling stays
+ * with the sender and blocking stays with an admin, so neither appears here.
+ */
+const COURIER_STATUSES: ParcelStatus[] = [
+  ParcelStatus.PICKED_UP,
+  ParcelStatus.IN_TRANSIT,
+  ParcelStatus.OUT_FOR_DELIVERY,
+  ParcelStatus.DELIVERED,
+];
+
+/** A parcel in one of these states is finished — nothing more to assign. */
+const CLOSED_STATUSES: ParcelStatus[] = [
+  ParcelStatus.DELIVERED,
+  ParcelStatus.CANCELLED,
 ];
 
 /**
@@ -78,10 +100,14 @@ export class ParcelService {
     return freshParcel;
   }
 
+  /**
+   * Admins may set any status. Couriers may only move parcels assigned to
+   * them, and only through the delivery statuses in `COURIER_STATUSES`.
+   */
   async updateStatus(
     trackingId: string,
     payload: UpdateParcelStatusDto,
-    admin: User,
+    actor: User,
   ): Promise<Parcel> {
     const parcel = await this.findByTrackingIdOrFail(trackingId);
 
@@ -93,11 +119,104 @@ export class ParcelService {
       throw new BadRequestException('Cannot update a cancelled parcel');
     }
 
+    if (actor.role === Role.DELIVERY_PERSONNEL) {
+      this.assertCourierMaySetStatus(parcel, payload.status, actor);
+    }
+
     parcel.status = payload.status;
     await this.parcelRepository.save(parcel);
-    await this.addStatusLog(parcel, payload.status, admin, payload.note);
+    await this.addStatusLog(parcel, payload.status, actor, payload.note);
 
     return this.refreshAndIndex(trackingId);
+  }
+
+  /**
+   * Puts an approved courier on a parcel. Re-assigning an already-assigned
+   * parcel is allowed — that is how a handover between couriers is recorded.
+   */
+  async assignDeliveryPersonnel(
+    trackingId: string,
+    deliveryPersonnelId: string,
+    admin: User,
+  ): Promise<Parcel> {
+    const parcel = await this.findByTrackingIdOrFail(trackingId);
+
+    if (parcel.isBlocked) {
+      throw new BadRequestException('Parcel is blocked');
+    }
+
+    if (CLOSED_STATUSES.includes(parcel.status)) {
+      throw new BadRequestException(
+        `Cannot assign a ${parcel.status.toLowerCase()} parcel`,
+      );
+    }
+
+    const courier =
+      await this.userService.findDeliveryPersonnelOrFail(deliveryPersonnelId);
+
+    parcel.deliveryPersonnel = courier;
+    await this.parcelRepository.save(parcel);
+    await this.addStatusLog(
+      parcel,
+      parcel.status,
+      admin,
+      // First name only: these notes surface on the public tracking page.
+      `Assigned to ${firstName(courier.name)}`,
+    );
+
+    return this.refreshAndIndex(trackingId);
+  }
+
+  /** Removes the courier without changing the parcel's status. */
+  async unassignDeliveryPersonnel(
+    trackingId: string,
+    admin: User,
+  ): Promise<Parcel> {
+    const parcel = await this.findByTrackingIdOrFail(trackingId);
+
+    if (!parcel.deliveryPersonnel) {
+      throw new BadRequestException('Parcel has no delivery personnel');
+    }
+
+    const previousName = firstName(parcel.deliveryPersonnel.name);
+    parcel.deliveryPersonnel = null;
+    await this.parcelRepository.save(parcel);
+    await this.addStatusLog(
+      parcel,
+      parcel.status,
+      admin,
+      `Unassigned from ${previousName}`,
+    );
+
+    return this.refreshAndIndex(trackingId);
+  }
+
+  /** Everything currently on a courier's plate — closed parcels excluded. */
+  async getAssignedParcels(courier: User): Promise<Parcel[]> {
+    return sanitizeParcels(
+      await this.parcelRepository.find({
+        where: {
+          deliveryPersonnel: { id: courier.id },
+          status: Not(In(CLOSED_STATUSES)),
+        },
+        relations: PARCEL_RELATIONS,
+        order: { createdAt: 'DESC' },
+      }),
+    );
+  }
+
+  /** A courier's completed deliveries, most recently updated first. */
+  async getCompletedDeliveries(courier: User): Promise<Parcel[]> {
+    return sanitizeParcels(
+      await this.parcelRepository.find({
+        where: {
+          deliveryPersonnel: { id: courier.id },
+          status: ParcelStatus.DELIVERED,
+        },
+        relations: PARCEL_RELATIONS,
+        order: { updatedAt: 'DESC' },
+      }),
+    );
   }
 
   async cancelParcel(trackingId: string, sender: User): Promise<Parcel> {
@@ -157,44 +276,56 @@ export class ParcelService {
   }
 
   async getMyParcels(sender: User): Promise<Parcel[]> {
-    return this.parcelRepository.find({
-      where: { sender: { id: sender.id } },
-      relations: PARCEL_RELATIONS,
-      order: { createdAt: 'DESC' },
-    });
+    return sanitizeParcels(
+      await this.parcelRepository.find({
+        where: { sender: { id: sender.id } },
+        relations: PARCEL_RELATIONS,
+        order: { createdAt: 'DESC' },
+      }),
+    );
   }
 
   async getIncomingParcels(receiver: User): Promise<Parcel[]> {
-    return this.parcelRepository.find({
-      where: {
-        receiver: { id: receiver.id },
-        status: ParcelStatus.IN_TRANSIT,
-      },
-      relations: ['sender', 'receiver', 'statusLogs'],
-      order: { createdAt: 'DESC' },
-    });
+    return sanitizeParcels(
+      await this.parcelRepository.find({
+        where: {
+          receiver: { id: receiver.id },
+          status: ParcelStatus.IN_TRANSIT,
+        },
+        relations: PARCEL_RELATIONS,
+        order: { createdAt: 'DESC' },
+      }),
+    );
   }
 
   async getDeliveryHistory(receiver: User): Promise<Parcel[]> {
-    return this.parcelRepository.find({
-      where: {
-        receiver: { id: receiver.id },
-        status: ParcelStatus.DELIVERED,
-      },
-      relations: ['sender', 'receiver', 'statusLogs'],
-      order: { updatedAt: 'DESC' },
-    });
+    return sanitizeParcels(
+      await this.parcelRepository.find({
+        where: {
+          receiver: { id: receiver.id },
+          status: ParcelStatus.DELIVERED,
+        },
+        relations: PARCEL_RELATIONS,
+        order: { updatedAt: 'DESC' },
+      }),
+    );
   }
 
   async getAllParcels(): Promise<Parcel[]> {
-    return this.parcelRepository.find({
-      relations: PARCEL_RELATIONS,
-      order: { createdAt: 'DESC' },
-    });
+    return sanitizeParcels(
+      await this.parcelRepository.find({
+        relations: PARCEL_RELATIONS,
+        order: { createdAt: 'DESC' },
+      }),
+    );
   }
 
-  async getByTrackingId(trackingId: string): Promise<Parcel> {
-    return this.getParcelWithLogs(trackingId);
+  /**
+   * Public tracking lookup. Returns the trimmed `PublicParcel` — no nested
+   * user records — because this is the one parcel route with no guard on it.
+   */
+  async getByTrackingId(trackingId: string): Promise<PublicParcel> {
+    return toPublicParcel(await this.getParcelWithLogs(trackingId));
   }
 
   /** Aggregates used by the dashboard, so it never queries parcels itself. */
@@ -249,6 +380,24 @@ export class ParcelService {
     );
   }
 
+  private assertCourierMaySetStatus(
+    parcel: Parcel,
+    status: ParcelStatus,
+    courier: User,
+  ): void {
+    if (parcel.deliveryPersonnel?.id !== courier.id) {
+      throw new ForbiddenException(
+        'You can only update parcels assigned to you',
+      );
+    }
+
+    if (!COURIER_STATUSES.includes(status)) {
+      throw new ForbiddenException(
+        `Delivery personnel cannot set status ${status}`,
+      );
+    }
+  }
+
   private async refreshAndIndex(trackingId: string): Promise<Parcel> {
     const updatedParcel = await this.getParcelWithLogs(trackingId);
     await this.triggerParcelIndex(updatedParcel);
@@ -258,7 +407,7 @@ export class ParcelService {
   private async findByTrackingIdOrFail(trackingId: string): Promise<Parcel> {
     const parcel = await this.parcelRepository.findOne({
       where: { trackingId },
-      relations: ['sender', 'receiver'],
+      relations: ['sender', 'receiver', 'deliveryPersonnel'],
     });
 
     if (!parcel) {
@@ -282,7 +431,9 @@ export class ParcelService {
       (a, b) => a.createdAt.getTime() - b.createdAt.getTime(),
     );
 
-    return parcel;
+    // Every public read and every mutation returns through here, so this is
+    // the one place the nested users need scrubbing.
+    return sanitizeParcel(parcel);
   }
 
   private async addStatusLog(

@@ -21,10 +21,13 @@ import { RolesGuard } from '../../common/guards/roles.guard';
 import { JWT_AUTH } from '../../config/swagger.config';
 import { User } from '../../user/entities/user.entity';
 import { Role } from '../../user/types/user.types';
+import { AssignDeliveryDto } from '../dto/assign-delivery.dto';
 import { CreateParcelDto } from '../dto/create-parcel.dto';
 import { ParcelResponseDto } from '../dto/parcel-response.dto';
+import { PublicParcelResponseDto } from '../dto/public-parcel-response.dto';
 import { UpdateParcelStatusDto } from '../dto/update-parcel-status.dto';
 import { Parcel } from '../entities/parcel.entity';
+import { PublicParcel } from '../types/parcel.types';
 import { ParcelService } from '../services/parcel.service';
 
 /** Every route below takes the parcel's public `trackingId`, not its uuid. */
@@ -54,13 +57,19 @@ export class ParcelController {
   @ApiBearerAuth(JWT_AUTH)
   @ApiOperation({
     summary: 'Move a parcel to a new status',
-    description: 'Admin only. Appends an entry to the parcel status log.',
+    description:
+      'Admins may set any status. Delivery personnel may only update parcels assigned to them, and only to PICKED_UP, IN_TRANSIT, OUT_FOR_DELIVERY or DELIVERED.',
   })
   @ApiParam(TRACKING_ID)
   @ApiResponse({ status: 200, type: ParcelResponseDto })
-  @ApiResponse({ status: 400, description: 'Illegal status transition' })
+  @ApiResponse({ status: 400, description: 'Parcel is blocked or cancelled' })
+  @ApiResponse({
+    status: 403,
+    description:
+      'Courier is not assigned to this parcel, or status not theirs to set',
+  })
   @UseGuards(JwtAuthGuard, RolesGuard)
-  @Roles(Role.ADMIN)
+  @Roles(Role.ADMIN, Role.DELIVERY_PERSONNEL)
   @Patch(':trackingId/status')
   updateStatus(
     @Param('trackingId') trackingId: string,
@@ -155,6 +164,79 @@ export class ParcelController {
   }
 
   @ApiBearerAuth(JWT_AUTH)
+  @ApiOperation({
+    summary: 'Assign a courier',
+    description:
+      'Admin only. The target must be an approved, active `DELIVERY_PERSONNEL`. Re-assigning records a handover.',
+  })
+  @ApiParam(TRACKING_ID)
+  @ApiResponse({ status: 200, type: ParcelResponseDto })
+  @ApiResponse({
+    status: 400,
+    description:
+      'Parcel is blocked/closed, or the user is not an approved courier',
+  })
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(Role.ADMIN)
+  @Patch(':trackingId/assign')
+  assignDeliveryPersonnel(
+    @Param('trackingId') trackingId: string,
+    @Body() payload: AssignDeliveryDto,
+    @CurrentUser() user: User,
+  ): Promise<Parcel> {
+    return this.parcelService.assignDeliveryPersonnel(
+      trackingId,
+      payload.deliveryPersonnelId,
+      user,
+    );
+  }
+
+  @ApiBearerAuth(JWT_AUTH)
+  @ApiOperation({
+    summary: 'Remove the assigned courier',
+    description: 'Admin only. Leaves the parcel status untouched.',
+  })
+  @ApiParam(TRACKING_ID)
+  @ApiResponse({ status: 200, type: ParcelResponseDto })
+  @ApiResponse({ status: 400, description: 'Parcel has no courier assigned' })
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(Role.ADMIN)
+  @Patch(':trackingId/unassign')
+  unassignDeliveryPersonnel(
+    @Param('trackingId') trackingId: string,
+    @CurrentUser() user: User,
+  ): Promise<Parcel> {
+    return this.parcelService.unassignDeliveryPersonnel(trackingId, user);
+  }
+
+  @ApiBearerAuth(JWT_AUTH)
+  @ApiOperation({
+    summary: 'Parcels assigned to you',
+    description:
+      'Delivery personnel only. Excludes delivered and cancelled parcels — this is the active queue.',
+  })
+  @ApiResponse({ status: 200, type: [ParcelResponseDto] })
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(Role.DELIVERY_PERSONNEL)
+  @Get('assigned-parcels')
+  getAssignedParcels(@CurrentUser() user: User): Promise<Parcel[]> {
+    return this.parcelService.getAssignedParcels(user);
+  }
+
+  @ApiBearerAuth(JWT_AUTH)
+  @ApiOperation({
+    summary: 'Deliveries you completed',
+    description: 'Delivery personnel only.',
+  })
+  @ApiResponse({ status: 200, type: [ParcelResponseDto] })
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(Role.DELIVERY_PERSONNEL)
+  @Get('completed-deliveries')
+  getCompletedDeliveries(@CurrentUser() user: User): Promise<Parcel[]> {
+    return this.parcelService.getCompletedDeliveries(user);
+  }
+
+  @ApiBearerAuth(JWT_AUTH)
   @ApiOperation({ summary: 'List every parcel', description: 'Admin only.' })
   @ApiResponse({ status: 200, type: [ParcelResponseDto] })
   @UseGuards(JwtAuthGuard, RolesGuard)
@@ -166,15 +248,16 @@ export class ParcelController {
 
   @ApiOperation({
     summary: 'Track a parcel',
-    description: 'Public — no authentication required.',
+    description:
+      'Public — no authentication required, so the response is trimmed: status, route and timeline only, with no sender, receiver or courier records attached.',
   })
   @ApiParam(TRACKING_ID)
-  @ApiResponse({ status: 200, type: ParcelResponseDto })
+  @ApiResponse({ status: 200, type: PublicParcelResponseDto })
   @ApiResponse({ status: 404, description: 'No parcel with that tracking id' })
   @Get(':trackingId')
   getParcelByTrackingId(
     @Param('trackingId') trackingId: string,
-  ): Promise<Parcel> {
+  ): Promise<PublicParcel> {
     return this.parcelService.getByTrackingId(trackingId);
   }
 }

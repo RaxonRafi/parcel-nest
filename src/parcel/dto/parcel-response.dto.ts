@@ -32,6 +32,13 @@ export class ParcelResponseDto {
   @ApiPropertyOptional({ type: UserResponseDto })
   receiver?: UserResponseDto;
 
+  @ApiPropertyOptional({
+    type: UserResponseDto,
+    nullable: true,
+    description: 'Assigned courier, or null while the parcel is unassigned.',
+  })
+  deliveryPersonnel?: UserResponseDto | null;
+
   @ApiProperty({ example: 'John Sender' })
   senderName!: string;
 

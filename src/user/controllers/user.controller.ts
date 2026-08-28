@@ -90,6 +90,32 @@ export class UserController {
   }
 
   @ApiBearerAuth(JWT_AUTH)
+  @ApiOperation({
+    summary: 'List courier applicants',
+    description: 'Admin only. Accounts sitting in `PENDING_DELIVERY`.',
+  })
+  @ApiResponse({ status: 200, type: [UserResponseDto] })
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(Role.ADMIN)
+  @Get('delivery/pending')
+  async getPendingDeliveryPersonnel(): Promise<SafeUser[]> {
+    return this.userService.getPendingDeliveryPersonnel();
+  }
+
+  @ApiBearerAuth(JWT_AUTH)
+  @ApiOperation({
+    summary: 'List approved couriers',
+    description: 'Admin only. The pool to pick from when assigning a parcel.',
+  })
+  @ApiResponse({ status: 200, type: [UserResponseDto] })
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(Role.ADMIN)
+  @Get('delivery')
+  async getDeliveryPersonnel(): Promise<SafeUser[]> {
+    return this.userService.getDeliveryPersonnel();
+  }
+
+  @ApiBearerAuth(JWT_AUTH)
   @ApiOperation({ summary: 'Get a user by id', description: 'Admin only.' })
   @ApiParam({ name: 'id', format: 'uuid' })
   @ApiResponse({ status: 200, type: UserResponseDto })
@@ -121,5 +147,41 @@ export class UserController {
   @Patch(':userId/unblock')
   async unblockUser(@Param('userId') userId: string): Promise<SafeUser> {
     return this.userService.setUserActiveStatus(userId, true);
+  }
+
+  @ApiBearerAuth(JWT_AUTH)
+  @ApiOperation({
+    summary: 'Approve a courier application',
+    description:
+      'Admin only. Promotes `PENDING_DELIVERY` to `DELIVERY_PERSONNEL`.',
+  })
+  @ApiParam({ name: 'userId', format: 'uuid' })
+  @ApiResponse({ status: 200, type: UserResponseDto })
+  @ApiResponse({ status: 400, description: 'User has no pending application' })
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(Role.ADMIN)
+  @Patch(':userId/delivery/approve')
+  async approveDeliveryPersonnel(
+    @Param('userId') userId: string,
+  ): Promise<SafeUser> {
+    return this.userService.setDeliveryApproval(userId, true);
+  }
+
+  @ApiBearerAuth(JWT_AUTH)
+  @ApiOperation({
+    summary: 'Reject a courier application',
+    description:
+      'Admin only. Drops the account back to `SENDER`, so the person keeps a usable account and can re-apply.',
+  })
+  @ApiParam({ name: 'userId', format: 'uuid' })
+  @ApiResponse({ status: 200, type: UserResponseDto })
+  @ApiResponse({ status: 400, description: 'User has no pending application' })
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(Role.ADMIN)
+  @Patch(':userId/delivery/reject')
+  async rejectDeliveryPersonnel(
+    @Param('userId') userId: string,
+  ): Promise<SafeUser> {
+    return this.userService.setDeliveryApproval(userId, false);
   }
 }

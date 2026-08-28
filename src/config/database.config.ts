@@ -33,6 +33,21 @@ export function buildDataSourceOptions(env: EnvReader): DataSourceOptions {
     synchronize: false,
     migrationsRun: env('DB_MIGRATIONS_RUN') === 'true',
     ssl,
+    extra: {
+      /**
+       * Supabase's session-mode pooler (port 5432) allows 15 clients in total,
+       * while node-postgres defaults to 10 per instance — so a dev server plus
+       * one script is enough to hit `EMAXCONNSESSION`. The same arithmetic bites
+       * harder on Vercel, where every warm lambda holds its own pool.
+       *
+       * Raise DB_POOL_MAX only if you also move to the transaction-mode pooler
+       * on port 6543, which allows far more clients.
+       */
+      max: Number(env('DB_POOL_MAX') ?? 5),
+      // Hand connections back quickly so idle instances stop holding slots.
+      idleTimeoutMillis: 10_000,
+      connectionTimeoutMillis: 10_000,
+    },
   };
 
   if (url) {

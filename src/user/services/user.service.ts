@@ -200,6 +200,37 @@ export class UserService {
     return users.map(sanitizeUser);
   }
 
+  /** Couriers waiting on an admin decision. */
+  async getPendingDeliveryPersonnel(): Promise<SafeUser[]> {
+    return this.findByRole(Role.PENDING_DELIVERY);
+  }
+
+  /** Approved couriers — the pool an admin assigns parcels from. */
+  async getDeliveryPersonnel(): Promise<SafeUser[]> {
+    return this.findByRole(Role.DELIVERY_PERSONNEL);
+  }
+
+  /**
+   * Resolves an approved courier, used by `ParcelService` before assigning a
+   * parcel. Applicants still in `PENDING_DELIVERY` are rejected here — that is
+   * the whole point of the approval step.
+   */
+  async findDeliveryPersonnelOrFail(id: string): Promise<User> {
+    const user = await this.findEntityByIdOrFail(id);
+
+    if (user.role !== Role.DELIVERY_PERSONNEL) {
+      throw new BadRequestException(
+        'User is not an approved delivery personnel',
+      );
+    }
+
+    if (user.isActive !== IsActive.ACTIVE) {
+      throw new BadRequestException(`Delivery personnel is ${user.isActive}`);
+    }
+
+    return user;
+  }
+
   async getStats(): Promise<UserStats> {
     const [totalUsers, activeUsers, blockedUsers] = await Promise.all([
       this.userRepository.count({ where: { isDeleted: false } }),
@@ -245,6 +276,27 @@ export class UserService {
   ): Promise<SafeUser> {
     const user = await this.findEntityByIdOrFail(userId);
     user.isActive = active ? IsActive.ACTIVE : IsActive.BLOCKED;
+    return sanitizeUser(await this.userRepository.save(user));
+  }
+
+  /**
+   * Resolves a `PENDING_DELIVERY` application. Approving promotes the account
+   * to `DELIVERY_PERSONNEL`; rejecting drops it back to `SENDER` so the person
+   * keeps a usable account and can re-apply.
+   */
+  async setDeliveryApproval(
+    userId: string,
+    approved: boolean,
+  ): Promise<SafeUser> {
+    const user = await this.findEntityByIdOrFail(userId);
+
+    if (user.role !== Role.PENDING_DELIVERY) {
+      throw new BadRequestException(
+        'User has no pending delivery personnel application',
+      );
+    }
+
+    user.role = approved ? Role.DELIVERY_PERSONNEL : Role.SENDER;
     return sanitizeUser(await this.userRepository.save(user));
   }
 
@@ -314,6 +366,14 @@ export class UserService {
   }
 
   // ─── Internals ────────────────────────────────────────────────────────────
+
+  private async findByRole(role: Role): Promise<SafeUser[]> {
+    const users = await this.userRepository.find({
+      where: { role, isDeleted: false },
+      order: { createdAt: 'DESC' },
+    });
+    return users.map(sanitizeUser);
+  }
 
   private async hashPassword(plainPassword: string): Promise<string> {
     return bcrypt.hash(

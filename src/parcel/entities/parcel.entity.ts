@@ -28,6 +28,14 @@ export class Parcel {
   @JoinColumn({ name: 'receiverId' })
   receiver: User;
 
+  /**
+   * The approved courier carrying this parcel. Null until an admin assigns
+   * one, and nulled again if that user is removed.
+   */
+  @ManyToOne(() => User, { nullable: true, onDelete: 'SET NULL' })
+  @JoinColumn({ name: 'deliveryPersonnelId' })
+  deliveryPersonnel: User | null;
+
   @Column()
   senderName: string;
 
