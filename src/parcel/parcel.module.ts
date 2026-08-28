@@ -1,6 +1,6 @@
 import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
-import { AccessControlModule } from '../../common/access-control.module';
+import { AccessControlModule } from '../common/access-control.module';
 import { ParcelController } from './controllers/parcel.controller';
 import { ParcelStatusLog } from './entities/parcel-status-log.entity';
 import { Parcel } from './entities/parcel.entity';

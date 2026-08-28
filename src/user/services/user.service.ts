@@ -10,7 +10,7 @@ import { ConfigService } from '@nestjs/config';
 import { InjectRepository } from '@nestjs/typeorm';
 import * as bcrypt from 'bcryptjs';
 import { Repository } from 'typeorm';
-import { extractBearerToken } from '../../../common/utils/jwt.util';
+import { extractBearerToken } from '../../common/utils/jwt.util';
 import { TokenService } from '../../token/services/token.service';
 import { AuthResponse } from '../../auth/types/auth.types';
 import { CreateReceiverDto } from '../dto/create-receiver.dto';
@@ -239,7 +239,10 @@ export class UserService {
     return this.updateUser(userId, updates, { id: userId } as User);
   }
 
-  async setUserActiveStatus(userId: string, active: boolean): Promise<SafeUser> {
+  async setUserActiveStatus(
+    userId: string,
+    active: boolean,
+  ): Promise<SafeUser> {
     const user = await this.findEntityByIdOrFail(userId);
     user.isActive = active ? IsActive.ACTIVE : IsActive.BLOCKED;
     return sanitizeUser(await this.userRepository.save(user));

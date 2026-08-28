@@ -4,8 +4,8 @@ import {
   Injectable,
   UnauthorizedException,
 } from '@nestjs/common';
-import { TokenService } from '../../modules/token/services/token.service';
-import { UserService } from '../../modules/user/services/user.service';
+import { TokenService } from '../../token/services/token.service';
+import { UserService } from '../../user/services/user.service';
 import { extractBearerToken } from '../utils/jwt.util';
 import { RequestWithUser } from '../types/request-with-user.type';
 

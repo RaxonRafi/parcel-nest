@@ -1,6 +1,6 @@
 import { INestApplication } from '@nestjs/common';
 import request from 'supertest';
-import { ParcelStatus } from '../src/parcel/parcel.interface';
+import { ParcelStatus } from '../src/parcel/types/parcel.types';
 import {
   authHeader,
   createTestApp,
@@ -199,9 +199,11 @@ describe('API (e2e)', () => {
         .set(authHeader(users.senderToken))
         .expect(200);
 
-      expect(res.body.some((p: { trackingId: string }) => p.trackingId === trackingId)).toBe(
-        true,
-      );
+      expect(
+        res.body.some(
+          (p: { trackingId: string }) => p.trackingId === trackingId,
+        ),
+      ).toBe(true);
     });
 
     it('GET /api/parcels/incoming-parcels', async () => {
@@ -210,9 +212,11 @@ describe('API (e2e)', () => {
         .set(authHeader(users.receiverToken))
         .expect(200);
 
-      expect(res.body.some((p: { trackingId: string }) => p.trackingId === trackingId)).toBe(
-        true,
-      );
+      expect(
+        res.body.some(
+          (p: { trackingId: string }) => p.trackingId === trackingId,
+        ),
+      ).toBe(true);
     });
 
     it('GET /api/parcels/:trackingId (public)', async () => {
@@ -238,9 +242,11 @@ describe('API (e2e)', () => {
         .set(authHeader(users.receiverToken))
         .expect(200);
 
-      expect(res.body.some((p: { trackingId: string }) => p.trackingId === trackingId)).toBe(
-        true,
-      );
+      expect(
+        res.body.some(
+          (p: { trackingId: string }) => p.trackingId === trackingId,
+        ),
+      ).toBe(true);
     });
 
     it('POST /api/parcels (second parcel for cancel test)', async () => {

@@ -48,11 +48,7 @@ export class ParcelService {
       throw new ForbiddenException('Only senders can create parcels');
     }
 
-    const receiver = await this.userService.findOrCreateReceiver({
-      name: payload.receiverName,
-      email: payload.receiverEmail,
-      phone: payload.receiverPhone,
-    });
+    const receiver = await this.resolveReceiver(payload);
 
     const parcel = this.parcelRepository.create({
       trackingId: this.generateTrackingId(),
@@ -230,6 +226,28 @@ export class ParcelService {
   }
 
   // ─── Internals ────────────────────────────────────────────────────────────
+
+  /**
+   * Receivers are addressed by id when the sender picked an existing account,
+   * and by email otherwise — in which case a placeholder account is created.
+   */
+  private async resolveReceiver(payload: CreateParcelDto): Promise<User> {
+    if (payload.receiverId) {
+      return this.userService.findEntityByIdOrFail(payload.receiverId);
+    }
+
+    if (payload.receiverEmail) {
+      return this.userService.findOrCreateReceiver({
+        name: payload.receiverName,
+        email: payload.receiverEmail,
+        phone: payload.receiverPhone,
+      });
+    }
+
+    throw new BadRequestException(
+      'Either receiverId or receiverEmail is required',
+    );
+  }
 
   private async refreshAndIndex(trackingId: string): Promise<Parcel> {
     const updatedParcel = await this.getParcelWithLogs(trackingId);

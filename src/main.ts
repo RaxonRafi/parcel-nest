@@ -1,6 +1,6 @@
 import { NestFactory } from '@nestjs/core';
 import { AppModule } from './app.module';
-import { UserService } from './user/user.service';
+import { UserService } from './user/services/user.service';
 
 let app;
 
@@ -25,7 +25,9 @@ async function bootstrap() {
   // ✅ Local: listen on port
   if (process.env.NODE_ENV !== 'production') {
     await app.listen(process.env.PORT ?? 3000);
-    console.log(`🚀 Server running on http://localhost:${process.env.PORT ?? 3000}/api`);
+    console.log(
+      `🚀 Server running on http://localhost:${process.env.PORT ?? 3000}/api`,
+    );
   } else {
     await app.init(); // Vercel serverless
   }

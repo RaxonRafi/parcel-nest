@@ -6,8 +6,8 @@ import {
 } from '@nestjs/common';
 import { Reflector } from '@nestjs/core';
 import { ROLES_KEY } from '../decorators/roles.decorator';
-import { Role } from '../../user/user.interface';
-import { RequestWithUser } from '../../auth/guards/jwt-auth.guard';
+import { Role } from '../../user/types/user.types';
+import { RequestWithUser } from '../types/request-with-user.type';
 
 @Injectable()
 export class RolesGuard implements CanActivate {
@@ -26,7 +26,9 @@ export class RolesGuard implements CanActivate {
     const { user } = context.switchToHttp().getRequest<RequestWithUser>();
 
     if (!requiredRoles.includes(user.role)) {
-      throw new ForbiddenException('You do not have permission for this action');
+      throw new ForbiddenException(
+        'You do not have permission for this action',
+      );
     }
 
     return true;

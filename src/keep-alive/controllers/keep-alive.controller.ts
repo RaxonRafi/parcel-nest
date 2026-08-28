@@ -1,4 +1,9 @@
-import { Controller, Get, Headers, UnauthorizedException } from '@nestjs/common';
+import {
+  Controller,
+  Get,
+  Headers,
+  UnauthorizedException,
+} from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { timingSafeEqual } from 'crypto';
 import { KeepAliveService } from '../services/keep-alive.service';
@@ -31,7 +36,10 @@ export class KeepAliveController {
     const expected = Buffer.from(`Bearer ${secret}`);
     const received = Buffer.from(auth);
 
-    if (expected.length !== received.length || !timingSafeEqual(expected, received)) {
+    if (
+      expected.length !== received.length ||
+      !timingSafeEqual(expected, received)
+    ) {
       throw new UnauthorizedException();
     }
   }

@@ -5,7 +5,10 @@ import { Pinecone } from '@pinecone-database/pinecone';
 import { Document } from '@langchain/core/documents';
 import { ChatPromptTemplate } from '@langchain/core/prompts';
 import { StringOutputParser } from '@langchain/core/output_parsers';
-import { RunnableSequence, RunnablePassthrough } from '@langchain/core/runnables';
+import {
+  RunnableSequence,
+  RunnablePassthrough,
+} from '@langchain/core/runnables';
 import { ChatGroq } from '@langchain/groq';
 import { HuggingFaceInferenceEmbeddings } from '@langchain/community/embeddings/hf';
 import { PDFLoader } from '@langchain/community/document_loaders/fs/pdf';
@@ -89,7 +92,9 @@ export class RagService implements OnModuleInit {
 
     fs.unlinkSync(filePath);
 
-    this.logger.log(`📄 Ingested "${metadata.source}" → ${chunks.length} chunks`);
+    this.logger.log(
+      `📄 Ingested "${metadata.source}" → ${chunks.length} chunks`,
+    );
     return { chunksIndexed: chunks.length };
   }
 
@@ -140,10 +145,12 @@ export class RagService implements OnModuleInit {
   // ─── Ask ──────────────────────────────────────────────────────────────────
 
   async ask(question: string, filter?: RagFilter): Promise<RagAnswer> {
-
     const retriever =
       filter && filter !== 'all'
-        ? this.vectorStore.asRetriever({ k: 5, filter: { type: { $eq: filter } } })
+        ? this.vectorStore.asRetriever({
+            k: 5,
+            filter: { type: { $eq: filter } },
+          })
         : this.vectorStore.asRetriever({ k: 5 });
 
     const prompt = ChatPromptTemplate.fromTemplate(`

@@ -5,9 +5,13 @@ import * as bcrypt from 'bcryptjs';
 import request from 'supertest';
 import { Repository } from 'typeorm';
 import { TestAppModule, testEnv } from '../test-app.module';
-import { AuthProvider } from '../../src/user/auth-provider.entity';
-import { User } from '../../src/user/user.entity';
-import { AuthProviderType, IsActive, Role } from '../../src/user/user.interface';
+import { AuthProvider } from '../../src/user/entities/auth-provider.entity';
+import { User } from '../../src/user/entities/user.entity';
+import {
+  AuthProviderType,
+  IsActive,
+  Role,
+} from '../../src/user/types/user.types';
 
 export interface SeededUsers {
   admin: User;
@@ -59,7 +63,11 @@ export async function seedUsers(app: INestApplication): Promise<SeededUsers> {
     return userRepository.save(user);
   };
 
-  const admin = await createSeededUser('Admin User', 'admin@test.com', Role.ADMIN);
+  const admin = await createSeededUser(
+    'Admin User',
+    'admin@test.com',
+    Role.ADMIN,
+  );
   const sender = await createSeededUser(
     'Sender User',
     'sender@test.com',

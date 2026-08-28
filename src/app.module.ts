@@ -1,34 +1,21 @@
 import { Module } from '@nestjs/common';
+import { ConfigModule } from '@nestjs/config';
 import { AppController } from './app.controller';
 import { AppService } from './app.service';
-import { ConfigModule, ConfigService } from '@nestjs/config';
-import { TypeOrmModule } from '@nestjs/typeorm';
-import { UserModule } from './user/user.module';
+import { DatabaseModule } from './database/database.module';
 import { AuthModule } from './auth/auth.module';
-import { ParcelModule } from './parcel/parcel.module';
 import { DashboardModule } from './dashboard/dashboard.module';
-import { RagModule } from './rag/rag.module';
 import { KeepAliveModule } from './keep-alive/keep-alive.module';
+import { ParcelModule } from './parcel/parcel.module';
+import { RagModule } from './rag/rag.module';
+import { TokenModule } from './token/token.module';
+import { UserModule } from './user/user.module';
 
 @Module({
   imports: [
     ConfigModule.forRoot({ isGlobal: true }),
-    TypeOrmModule.forRootAsync({
-      inject: [ConfigService],
-      useFactory: (config: ConfigService) => ({
-        type: 'postgres',
-        host: config.get<string>('DB_HOST'),
-        port: config.get<number>('DB_PORT'),
-        username: config.get<string>('DB_USERNAME'),
-        password: config.get<string>('DB_PASSWORD'),
-        database: config.get<string>('DB_NAME'),
-        autoLoadEntities: true,
-        synchronize: true,
-        ssl: { rejectUnauthorized: false },
-        retryAttempts: 3,
-        retryDelay: 5000,
-      }),
-    }),
+    DatabaseModule,
+    TokenModule,
     UserModule,
     AuthModule,
     ParcelModule,

@@ -1,3 +1,93 @@
+## 🗂️ Project Structure
+
+Each feature is a self-contained module folder. Inside it, code is split by role
+so a file's job is obvious from its path:
+
+```
+src/
+├── config/                     # Shared configuration builders
+│   ├── database.config.ts      # One DataSourceOptions factory, used by Nest and the CLI
+│   └── load-env.ts             # .env loading for processes that boot outside Nest
+├── database/
+│   ├── data-source.ts          # DataSource the TypeORM CLI points at
+│   ├── database.module.ts      # TypeOrmModule.forRootAsync wiring
+│   └── migrations/             # Versioned schema changes
+├── common/                     # Cross-cutting building blocks
+│   ├── access-control.module.ts
+│   ├── decorators/             # @Roles, @CurrentUser
+│   ├── guards/                 # JwtAuthGuard, RolesGuard
+│   ├── types/
+│   └── utils/
+├── <feature>/                  # user, auth, token, parcel, dashboard, rag, keep-alive
+│   ├── controllers/            # HTTP layer only — no business logic
+│   ├── services/               # Business logic; the only place repositories live
+│   ├── entities/               # TypeORM entities owned by this module
+│   ├── dto/                    # Request/response payload shapes
+│   ├── types/                  # Enums, interfaces, return types
+│   └── <feature>.module.ts     # DI wiring
+├── app.module.ts
+└── main.ts
+```
+
+### Rules the layout enforces
+
+**Entities are reached through services, never across modules.** Only the module
+that owns a table calls `TypeOrmModule.forFeature` for it:
+
+| Module   | Owns                              |
+|----------|-----------------------------------|
+| `user`   | `users`, `auth_providers`         |
+| `parcel` | `parcels`, `parcel_status_logs`   |
+
+Everything else asks the owning service. `ParcelService` resolves a receiver via
+`UserService.findOrCreateReceiver()`; `DashboardService` injects no repository at
+all and composes `UserService.getStats()` with `ParcelService.getStats()`.
+
+**No circular module imports, no `forwardRef`.** JWT signing lives in a
+dependency-free `TokenModule`, so `UserModule` and `AuthModule` both depend on it
+instead of on each other:
+
+```
+TokenModule ─┬─> UserModule ─> AccessControlModule ─┬─> AuthModule
+             └────────────────────────────────────  ├─> ParcelModule ─> DashboardModule
+                                                    └─> ...
+```
+
+`AccessControlModule` bundles the guards with the providers they inject, so a
+feature module gets `@UseGuards(JwtAuthGuard, RolesGuard)` by importing one thing.
+
+---
+
+## 🧱 Database Migrations
+
+`synchronize` is **off**. The schema is owned by the files in
+`src/database/migrations/` and applied explicitly.
+
+```bash
+npm run migration:run       # apply pending migrations
+npm run migration:show      # list applied / pending
+npm run migration:revert    # roll back the last one
+```
+
+To add a change, edit the entity, then let TypeORM diff it against the database:
+
+```bash
+npm run migration:generate -- src/database/migrations/AddParcelWeight
+```
+
+For a migration you want to hand-write, use `npm run migration:create -- src/database/migrations/Name`.
+
+**Existing databases:** the baseline migration is written with `CREATE TABLE IF
+NOT EXISTS`, so running it against a database that `synchronize` already built is
+a no-op that just records the baseline. (`npm run migration:run -- --fake` is the
+alternative if you would rather not touch it at all.)
+
+Connection settings come from `DATABASE_URL`, or the discrete `DB_*` variables —
+see `example.env`. Set `DB_SSL=false` for a local Postgres without TLS. Migrations
+are **not** run on boot by default; set `DB_MIGRATIONS_RUN=true` if you want that.
+
+---
+
 ## 🖥️ Frontend (Next.js)
 
 The SwiftParcel UI lives in [`percel-client/`](./percel-client/) — landing page + dashboard from `design-reference/swiftparcel.html`.

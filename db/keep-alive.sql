@@ -1,4 +1,5 @@
--- Run once in the Supabase SQL editor.
+-- Superseded by src/database/migrations/*-KeepAliveTable.ts.
+-- Kept for reference / for applying by hand in the Supabase SQL editor.
 create table if not exists keep_alive (
   id int primary key,
   ping timestamptz default now()
