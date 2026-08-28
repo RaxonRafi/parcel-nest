@@ -2,6 +2,7 @@ import { Test, TestingModule } from '@nestjs/testing';
 import { JwtAuthGuard } from '../../common/guards/jwt-auth.guard';
 import { RolesGuard } from '../../common/guards/roles.guard';
 import { UserService } from '../services/user.service';
+import { QueryUsersDto } from '../dto/query-users.dto';
 import { UserController } from './user.controller';
 
 describe('UserController', () => {
@@ -28,8 +29,11 @@ describe('UserController', () => {
     expect(controller).toBeDefined();
   });
 
-  it('delegates all-users to the service', async () => {
-    await expect(controller.getAllUsers()).resolves.toEqual([]);
-    expect(userService.getAllUsers).toHaveBeenCalled();
+  it('passes the pagination query through to the service', async () => {
+    const query = Object.assign(new QueryUsersDto(), { page: 2, limit: 50 });
+
+    await controller.getAllUsers(query);
+
+    expect(userService.getAllUsers).toHaveBeenCalledWith(query);
   });
 });

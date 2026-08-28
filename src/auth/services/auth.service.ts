@@ -12,6 +12,7 @@ import { ChangePasswordDto } from '../dto/change-password.dto';
 import { LoginDto } from '../dto/login.dto';
 import { AuthResponse, MessageResponse } from '../types/auth.types';
 import { TokenPair } from '../../token/types/token.types';
+import { EmailVerificationService } from './email-verification.service';
 import { PasswordResetService } from './password-reset.service';
 import { SessionService } from './session.service';
 
@@ -26,6 +27,7 @@ export class AuthService {
     private readonly tokenService: TokenService,
     private readonly sessionService: SessionService,
     private readonly passwordResetService: PasswordResetService,
+    private readonly emailVerificationService: EmailVerificationService,
     private readonly config: ConfigService,
   ) {}
 
@@ -124,6 +126,28 @@ export class AuthService {
     await this.sessionService.revokeAllForUser(grant.user.id);
 
     return { message: 'Password reset — sign in with your new password' };
+  }
+
+  /** Confirms an address and flips `isVerified`. */
+  async verifyEmail(token: string): Promise<MessageResponse> {
+    const user = await this.emailVerificationService.consume(token);
+    await this.userService.markVerified(user.id);
+
+    return { message: 'Email confirmed' };
+  }
+
+  /** Like `forgot-password`, this never reveals whether the address exists. */
+  async resendVerification(email: string): Promise<MessageResponse> {
+    const user = await this.userService.findByEmail(email);
+
+    if (user && !user.isVerified) {
+      await this.emailVerificationService.issue(user);
+    }
+
+    return {
+      message:
+        'If that email has an unconfirmed account, a new link is on its way',
+    };
   }
 
   async changePassword(

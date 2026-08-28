@@ -1,6 +1,7 @@
 import { Test, TestingModule } from '@nestjs/testing';
 import { ConfigService } from '@nestjs/config';
 import { getRepositoryToken } from '@nestjs/typeorm';
+import { EmailVerificationService } from '../../auth/services/email-verification.service';
 import { TokenService } from '../../token/services/token.service';
 import { User } from '../entities/user.entity';
 import { IsActive, Role } from '../types/user.types';
@@ -19,6 +20,7 @@ describe('UserService', () => {
           useValue: { get: jest.fn(), getOrThrow: jest.fn() },
         },
         { provide: TokenService, useValue: {} },
+        { provide: EmailVerificationService, useValue: { issue: jest.fn() } },
       ],
     }).compile();
 

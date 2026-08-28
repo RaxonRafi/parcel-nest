@@ -1,4 +1,5 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
+import { PageMetaDto } from '../../common/dto/paginated-response.dto';
 import { UserResponseDto } from '../../user/dto/user-response.dto';
 import { ParcelStatus } from '../types/parcel.types';
 
@@ -66,6 +67,33 @@ export class ParcelResponseDto {
   @ApiProperty({ default: false })
   isBlocked!: boolean;
 
+  @ApiProperty({ example: 2.5, description: 'Kilograms.' })
+  weightKg!: number;
+
+  @ApiProperty({
+    example: 110,
+    description: 'Computed server-side from weight.',
+  })
+  deliveryFee!: number;
+
+  @ApiProperty({ example: 0, description: 'Cash to collect. 0 means prepaid.' })
+  codAmount!: number;
+
+  @ApiProperty({ default: false })
+  isCodCollected!: boolean;
+
+  @ApiProperty({ type: [String], description: 'Proof-of-delivery image URLs.' })
+  deliveryProofImages!: string[];
+
+  @ApiPropertyOptional({ nullable: true })
+  deliveryProofNote!: string | null;
+
+  @ApiPropertyOptional({ nullable: true, example: 'Neighbour at flat 4B' })
+  receivedBy!: string | null;
+
+  @ApiPropertyOptional({ nullable: true, format: 'date-time' })
+  deliveredAt!: Date | null;
+
   @ApiPropertyOptional({ type: [ParcelStatusLogResponseDto] })
   statusLogs?: ParcelStatusLogResponseDto[];
 
@@ -74,4 +102,12 @@ export class ParcelResponseDto {
 
   @ApiProperty({ format: 'date-time' })
   updatedAt!: Date;
+}
+
+export class PaginatedParcelsDto {
+  @ApiProperty({ type: [ParcelResponseDto] })
+  data!: ParcelResponseDto[];
+
+  @ApiProperty({ type: PageMetaDto })
+  meta!: PageMetaDto;
 }

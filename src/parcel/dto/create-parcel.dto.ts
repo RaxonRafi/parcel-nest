@@ -1,13 +1,16 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
-import { Transform } from 'class-transformer';
+import { Transform, Type } from 'class-transformer';
 import {
   IsEmail,
   IsNotEmpty,
+  IsNumber,
   IsOptional,
   IsString,
   IsUUID,
   Matches,
+  Max,
   MaxLength,
+  Min,
   ValidateIf,
 } from 'class-validator';
 import { PHONE_REGEX } from '../../common/constants/validation.constants';
@@ -68,4 +71,29 @@ export class CreateParcelDto {
   @IsString()
   @MaxLength(1000)
   description?: string;
+
+  @ApiPropertyOptional({
+    default: 1,
+    minimum: 0.01,
+    maximum: 1000,
+    description: 'Parcel weight in kilograms. Drives the delivery fee.',
+  })
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber({ maxDecimalPlaces: 3 })
+  @Min(0.01)
+  @Max(1000)
+  weightKg?: number;
+
+  @ApiPropertyOptional({
+    default: 0,
+    description:
+      'Cash to collect from the receiver on delivery. 0 (the default) means prepaid.',
+  })
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber({ maxDecimalPlaces: 2 })
+  @Min(0)
+  @Max(1_000_000)
+  codAmount?: number;
 }

@@ -21,6 +21,7 @@ import { LoginDto } from '../dto/login.dto';
 import { LogoutDto } from '../dto/logout.dto';
 import { RefreshTokenDto } from '../dto/refresh-token.dto';
 import { ResetPasswordDto } from '../dto/reset-password.dto';
+import { VerifyEmailDto } from '../dto/verify-email.dto';
 import { AuthService } from '../services/auth.service';
 import { AuthResponse, MessageResponse } from '../types/auth.types';
 import { TokenPair } from '../../token/types/token.types';
@@ -105,6 +106,33 @@ export class AuthController {
     @Body() body: ResetPasswordDto,
   ): Promise<MessageResponse> {
     return this.authService.resetPassword(body.token, body.newPassword);
+  }
+
+  @ApiOperation({
+    summary: 'Confirm an email address',
+    description:
+      'Takes the token from the confirmation link. Single use, valid 24 hours.',
+  })
+  @ApiResponse({ status: 201, type: MessageResponseDto })
+  @ApiResponse({ status: 400, description: 'Token invalid, used, or expired' })
+  @Throttle({ auth: { limit: 8, ttl: 60_000 } })
+  @Post('verify-email')
+  async verifyEmail(@Body() body: VerifyEmailDto): Promise<MessageResponse> {
+    return this.authService.verifyEmail(body.token);
+  }
+
+  @ApiOperation({
+    summary: 'Send another confirmation link',
+    description:
+      'Always reports success, whether or not the address has an unconfirmed account.',
+  })
+  @ApiResponse({ status: 201, type: MessageResponseDto })
+  @Throttle({ auth: { limit: 8, ttl: 60_000 } })
+  @Post('resend-verification')
+  async resendVerification(
+    @Body() body: ForgotPasswordDto,
+  ): Promise<MessageResponse> {
+    return this.authService.resendVerification(body.email);
   }
 
   @ApiBearerAuth(JWT_AUTH)

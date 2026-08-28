@@ -4,6 +4,7 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { randomBytes } from 'crypto';
 import { IsNull, LessThan, Repository } from 'typeorm';
 import { MailService } from '../../mail/services/mail.service';
+import { claimAccountTemplate } from '../../mail/templates/account.template';
 import { passwordResetEmail } from '../../mail/templates/password-reset.template';
 import { User } from '../../user/entities/user.entity';
 import { PasswordReset } from '../entities/password-reset.entity';
@@ -28,20 +29,7 @@ export class PasswordResetService {
    * is spent first, so requesting a second link invalidates the first.
    */
   async issue(user: User): Promise<void> {
-    await this.spendAllForUser(user.id);
-
-    const token = randomBytes(32).toString('hex');
-    const expiresAt = new Date(Date.now() + EXPIRY_MINUTES * 60_000);
-
-    await this.resetRepository.save(
-      this.resetRepository.create({
-        user,
-        tokenHash: hashToken(token),
-        expiresAt,
-        usedAt: null,
-      }),
-    );
-
+    const token = await this.createGrant(user);
     const url = `${this.webBaseUrl()}/reset-password?token=${token}`;
     const { html, text } = passwordResetEmail(user.name, url, EXPIRY_MINUTES);
 
@@ -60,6 +48,36 @@ export class PasswordResetService {
       const message = error instanceof Error ? error.message : 'Unknown error';
       this.logger.error(
         `Password reset email to ${user.email} could not be sent: ${message}`,
+      );
+    }
+  }
+
+  /**
+   * Same grant, different framing: a receiver who had an account created for
+   * them by a sender never chose a password, so "claim your account" and
+   * "reset your password" are the same mechanism.
+   */
+  async issueClaim(
+    user: User,
+    senderName: string,
+    trackingId: string,
+  ): Promise<void> {
+    const token = await this.createGrant(user);
+    const url = `${this.webBaseUrl()}/reset-password?token=${token}`;
+    const { subject, html, text } = claimAccountTemplate(
+      user.name,
+      senderName,
+      trackingId,
+      url,
+      EXPIRY_MINUTES,
+    );
+
+    try {
+      await this.mailService.send(user.email, subject, html, text);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Unknown error';
+      this.logger.error(
+        `Claim-account email to ${user.email} could not be sent: ${message}`,
       );
     }
   }
@@ -92,6 +110,23 @@ export class PasswordResetService {
     });
 
     return result.affected ?? 0;
+  }
+
+  /** Spends any outstanding grant, then mints a fresh one. */
+  private async createGrant(user: User): Promise<string> {
+    await this.spendAllForUser(user.id);
+
+    const token = randomBytes(32).toString('hex');
+    await this.resetRepository.save(
+      this.resetRepository.create({
+        user,
+        tokenHash: hashToken(token),
+        expiresAt: new Date(Date.now() + EXPIRY_MINUTES * 60_000),
+        usedAt: null,
+      }),
+    );
+
+    return token;
   }
 
   private async spendAllForUser(userId: string): Promise<void> {

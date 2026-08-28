@@ -1,4 +1,5 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
+import { PageMetaDto } from '../../common/dto/paginated-response.dto';
 import { AuthProviderType, IsActive, Role } from '../types/user.types';
 
 /** Documentation shape for `SafeUser` — the user record minus the password. */
@@ -58,4 +59,12 @@ export class UserResponseDto {
 
   @ApiProperty({ format: 'date-time' })
   updatedAt!: Date;
+}
+
+export class PaginatedUsersDto {
+  @ApiProperty({ type: [UserResponseDto] })
+  data!: UserResponseDto[];
+
+  @ApiProperty({ type: PageMetaDto })
+  meta!: PageMetaDto;
 }

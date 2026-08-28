@@ -6,17 +6,33 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { In, Not, Repository } from 'typeorm';
+import {
+  Between,
+  ILike,
+  In,
+  IsNull,
+  LessThanOrEqual,
+  MoreThanOrEqual,
+  Not,
+  Repository,
+} from 'typeorm';
+import { ConfigService } from '@nestjs/config';
+import { Paginated, paginate } from '../../common/types/paginated.type';
 import { firstName } from '../../common/utils/name.util';
 import { User } from '../../user/entities/user.entity';
 import { RagService } from '../../rag/services/rag.service';
 import { UserService } from '../../user/services/user.service';
 import { Role } from '../../user/types/user.types';
 import { CreateParcelDto } from '../dto/create-parcel.dto';
+import { DeliveryProofDto } from '../dto/delivery-proof.dto';
+import { QueryParcelsDto } from '../dto/query-parcels.dto';
 import { UpdateParcelStatusDto } from '../dto/update-parcel-status.dto';
 import { ParcelStatusLog } from '../entities/parcel-status-log.entity';
 import { Parcel } from '../entities/parcel.entity';
+import { calculateDeliveryFee, ratesFromEnv } from '../utils/pricing.util';
 import { toPublicParcel } from '../utils/public-parcel.util';
+import { PasswordResetService } from '../../auth/services/password-reset.service';
+import { ParcelNotificationService } from './parcel-notification.service';
 import { sanitizeParcel, sanitizeParcels } from '../utils/sanitize-parcel.util';
 import {
   PARCEL_STATUS_TRANSITIONS,
@@ -45,6 +61,17 @@ const COURIER_STATUSES: ParcelStatus[] = [
   ParcelStatus.DELIVERED,
 ];
 
+/** Builds the right TypeORM operator for whichever bounds were supplied. */
+function dateRange(
+  from?: string,
+  to?: string,
+): ReturnType<typeof Between> | ReturnType<typeof MoreThanOrEqual> | undefined {
+  if (from && to) return Between(new Date(from), new Date(to));
+  if (from) return MoreThanOrEqual(new Date(from));
+  if (to) return LessThanOrEqual(new Date(to));
+  return undefined;
+}
+
 /** A parcel in one of these states is finished — nothing more to assign. */
 const CLOSED_STATUSES: ParcelStatus[] = [
   ParcelStatus.DELIVERED,
@@ -66,6 +93,9 @@ export class ParcelService {
     private readonly statusLogRepository: Repository<ParcelStatusLog>,
     private readonly userService: UserService,
     private readonly ragService: RagService,
+    private readonly notifications: ParcelNotificationService,
+    private readonly config: ConfigService,
+    private readonly passwordResetService: PasswordResetService,
   ) {}
 
   async create(sender: User, payload: CreateParcelDto): Promise<Parcel> {
@@ -73,7 +103,17 @@ export class ParcelService {
       throw new ForbiddenException('Only senders can create parcels');
     }
 
-    const receiver = await this.resolveReceiver(payload);
+    const { user: receiver, created: receiverIsNew } =
+      await this.resolveReceiver(payload);
+
+    const weightKg = payload.weightKg ?? 1;
+    const codAmount = payload.codAmount ?? 0;
+    // Priced here, never taken from the request.
+    const { total: deliveryFee } = calculateDeliveryFee(
+      weightKg,
+      codAmount,
+      ratesFromEnv((key) => this.config.get<string>(key)),
+    );
 
     const parcel = this.parcelRepository.create({
       trackingId: this.generateTrackingId(),
@@ -86,6 +126,9 @@ export class ParcelService {
       pickupAddress: payload.pickupAddress,
       deliveryAddress: payload.deliveryAddress,
       description: payload.description,
+      weightKg,
+      codAmount,
+      deliveryFee,
       status: ParcelStatus.PENDING,
       statusLogs: [
         {
@@ -99,6 +142,15 @@ export class ParcelService {
     const savedParcel = await this.parcelRepository.save(parcel);
     const freshParcel = await this.getParcelWithLogs(savedParcel.trackingId);
     await this.triggerParcelIndex(freshParcel);
+
+    if (receiverIsNew) {
+      // The account was created for them; they have no password yet.
+      await this.passwordResetService.issueClaim(
+        receiver,
+        sender.name,
+        freshParcel.trackingId,
+      );
+    }
 
     return freshParcel;
   }
@@ -193,30 +245,28 @@ export class ParcelService {
   }
 
   /** Everything currently on a courier's plate — closed parcels excluded. */
-  async getAssignedParcels(courier: User): Promise<Parcel[]> {
-    return sanitizeParcels(
-      await this.parcelRepository.find({
-        where: {
-          deliveryPersonnel: { id: courier.id },
-          status: Not(In(CLOSED_STATUSES)),
-        },
-        relations: PARCEL_RELATIONS,
-        order: { createdAt: 'DESC' },
-      }),
-    );
+  async getAssignedParcels(
+    courier: User,
+    query: QueryParcelsDto,
+  ): Promise<Paginated<Parcel>> {
+    return this.findPage(query, {
+      deliveryPersonnel: { id: courier.id },
+      status: Not(In(CLOSED_STATUSES)),
+    });
   }
 
   /** A courier's completed deliveries, most recently updated first. */
-  async getCompletedDeliveries(courier: User): Promise<Parcel[]> {
-    return sanitizeParcels(
-      await this.parcelRepository.find({
-        where: {
-          deliveryPersonnel: { id: courier.id },
-          status: ParcelStatus.DELIVERED,
-        },
-        relations: PARCEL_RELATIONS,
-        order: { updatedAt: 'DESC' },
-      }),
+  async getCompletedDeliveries(
+    courier: User,
+    query: QueryParcelsDto,
+  ): Promise<Paginated<Parcel>> {
+    return this.findPage(
+      query,
+      {
+        deliveryPersonnel: { id: courier.id },
+        status: ParcelStatus.DELIVERED,
+      },
+      'updatedAt',
     );
   }
 
@@ -276,49 +326,91 @@ export class ParcelService {
     return this.refreshAndIndex(trackingId);
   }
 
-  async getMyParcels(sender: User): Promise<Parcel[]> {
-    return sanitizeParcels(
-      await this.parcelRepository.find({
-        where: { sender: { id: sender.id } },
-        relations: PARCEL_RELATIONS,
-        order: { createdAt: 'DESC' },
-      }),
+  async getMyParcels(
+    sender: User,
+    query: QueryParcelsDto,
+  ): Promise<Paginated<Parcel>> {
+    return this.findPage(query, { sender: { id: sender.id } });
+  }
+
+  async getIncomingParcels(
+    receiver: User,
+    query: QueryParcelsDto,
+  ): Promise<Paginated<Parcel>> {
+    return this.findPage(query, {
+      receiver: { id: receiver.id },
+      status: Not(In(CLOSED_STATUSES)),
+    });
+  }
+
+  async getDeliveryHistory(
+    receiver: User,
+    query: QueryParcelsDto,
+  ): Promise<Paginated<Parcel>> {
+    return this.findPage(
+      query,
+      { receiver: { id: receiver.id }, status: ParcelStatus.DELIVERED },
+      'updatedAt',
     );
   }
 
-  async getIncomingParcels(receiver: User): Promise<Parcel[]> {
-    return sanitizeParcels(
-      await this.parcelRepository.find({
-        where: {
-          receiver: { id: receiver.id },
-          status: ParcelStatus.IN_TRANSIT,
-        },
-        relations: PARCEL_RELATIONS,
-        order: { createdAt: 'DESC' },
-      }),
-    );
+  async getAllParcels(query: QueryParcelsDto): Promise<Paginated<Parcel>> {
+    return this.findPage(query, {});
   }
 
-  async getDeliveryHistory(receiver: User): Promise<Parcel[]> {
-    return sanitizeParcels(
-      await this.parcelRepository.find({
-        where: {
-          receiver: { id: receiver.id },
-          status: ParcelStatus.DELIVERED,
-        },
-        relations: PARCEL_RELATIONS,
-        order: { updatedAt: 'DESC' },
-      }),
-    );
-  }
+  /**
+   * Records what was captured at handover and closes the parcel out.
+   *
+   * Kept separate from `updateStatus` because proof is evidence rather than a
+   * state change — it carries images, who signed, and whether cash changed
+   * hands, none of which belong in a status payload.
+   */
+  async submitDeliveryProof(
+    trackingId: string,
+    payload: DeliveryProofDto,
+    actor: User,
+  ): Promise<Parcel> {
+    const parcel = await this.findByTrackingIdOrFail(trackingId);
 
-  async getAllParcels(): Promise<Parcel[]> {
-    return sanitizeParcels(
-      await this.parcelRepository.find({
-        relations: PARCEL_RELATIONS,
-        order: { createdAt: 'DESC' },
-      }),
+    if (actor.role === Role.DELIVERY_PERSONNEL) {
+      if (parcel.deliveryPersonnel?.id !== actor.id) {
+        throw new ForbiddenException(
+          'You can only submit proof for parcels assigned to you',
+        );
+      }
+    }
+
+    if (parcel.status === ParcelStatus.CANCELLED) {
+      throw new BadRequestException('Cannot deliver a cancelled parcel');
+    }
+
+    if (parcel.codAmount > 0 && !payload.codCollected) {
+      throw new BadRequestException(
+        `This parcel is cash on delivery (${parcel.codAmount}) — confirm collection with codCollected`,
+      );
+    }
+
+    parcel.deliveryProofImages = payload.images;
+    parcel.deliveryProofNote = payload.note ?? null;
+    parcel.receivedBy = payload.receivedBy ?? parcel.receiverName;
+    parcel.isCodCollected = payload.codCollected ?? parcel.isCodCollected;
+
+    // Proof is only meaningful alongside the transition it evidences.
+    if (parcel.status !== ParcelStatus.DELIVERED) {
+      this.assertTransitionAllowed(parcel.status, ParcelStatus.DELIVERED);
+      parcel.status = ParcelStatus.DELIVERED;
+    }
+
+    parcel.deliveredAt = new Date();
+    await this.parcelRepository.save(parcel);
+    await this.addStatusLog(
+      parcel,
+      ParcelStatus.DELIVERED,
+      actor,
+      payload.note ?? `Delivered to ${parcel.receivedBy}`,
     );
+
+    return this.refreshAndIndex(trackingId);
   }
 
   /**
@@ -363,9 +455,14 @@ export class ParcelService {
    * Receivers are addressed by id when the sender picked an existing account,
    * and by email otherwise — in which case a placeholder account is created.
    */
-  private async resolveReceiver(payload: CreateParcelDto): Promise<User> {
+  private async resolveReceiver(
+    payload: CreateParcelDto,
+  ): Promise<{ user: User; created: boolean }> {
     if (payload.receiverId) {
-      return this.userService.findEntityByIdOrFail(payload.receiverId);
+      return {
+        user: await this.userService.findEntityByIdOrFail(payload.receiverId),
+        created: false,
+      };
     }
 
     if (payload.receiverEmail) {
@@ -379,6 +476,54 @@ export class ParcelService {
     throw new BadRequestException(
       'Either receiverId or receiverEmail is required',
     );
+  }
+
+  /**
+   * One query builder for every parcel list, so filters, ordering and the
+   * response envelope cannot drift between them.
+   */
+  private async findPage(
+    query: QueryParcelsDto,
+    scope: Record<string, unknown>,
+    orderBy: 'createdAt' | 'updatedAt' = 'createdAt',
+  ): Promise<Paginated<Parcel>> {
+    const filters: Record<string, unknown> = { ...scope };
+
+    // An explicit status filter narrows the caller's scope; it never widens it.
+    if (query.status && !('status' in scope)) {
+      filters.status = query.status;
+    }
+    if (query.isBlocked !== undefined) {
+      filters.isBlocked = query.isBlocked;
+    }
+    if (query.unassigned) {
+      filters.deliveryPersonnel = IsNull();
+    }
+
+    const createdAt = dateRange(query.from, query.to);
+    if (createdAt) {
+      filters.createdAt = createdAt;
+    }
+
+    // `find` ORs an array of conditions, which is how one search term can match
+    // any of three columns while every other filter still applies.
+    const searchable = ['trackingId', 'senderName', 'receiverName'];
+    const where = query.search
+      ? searchable.map((field) => ({
+          ...filters,
+          [field]: ILike(`%${query.search}%`),
+        }))
+      : filters;
+
+    const [data, total] = await this.parcelRepository.findAndCount({
+      where: where as never,
+      relations: PARCEL_RELATIONS,
+      order: { [orderBy]: 'DESC' },
+      skip: query.skip,
+      take: query.limit,
+    });
+
+    return paginate(sanitizeParcels(data), total, query.page, query.limit);
   }
 
   private assertTransitionAllowed(from: ParcelStatus, to: ParcelStatus): void {
@@ -415,9 +560,15 @@ export class ParcelService {
     }
   }
 
+  /**
+   * Single exit point for every mutation: re-read with relations, re-index for
+   * search, and email whoever cares. Both side effects swallow their own
+   * failures so neither can undo a committed write.
+   */
   private async refreshAndIndex(trackingId: string): Promise<Parcel> {
     const updatedParcel = await this.getParcelWithLogs(trackingId);
     await this.triggerParcelIndex(updatedParcel);
+    await this.notifications.notifyStatusChange(updatedParcel);
     return updatedParcel;
   }
 

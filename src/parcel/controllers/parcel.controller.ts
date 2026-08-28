@@ -5,6 +5,7 @@ import {
   Param,
   Patch,
   Post,
+  Query,
   UseGuards,
 } from '@nestjs/common';
 import {
@@ -21,9 +22,15 @@ import { RolesGuard } from '../../common/guards/roles.guard';
 import { JWT_AUTH } from '../../config/swagger.config';
 import { User } from '../../user/entities/user.entity';
 import { Role } from '../../user/types/user.types';
+import { Paginated } from '../../common/types/paginated.type';
 import { AssignDeliveryDto } from '../dto/assign-delivery.dto';
+import { DeliveryProofDto } from '../dto/delivery-proof.dto';
+import { QueryParcelsDto } from '../dto/query-parcels.dto';
 import { CreateParcelDto } from '../dto/create-parcel.dto';
-import { ParcelResponseDto } from '../dto/parcel-response.dto';
+import {
+  PaginatedParcelsDto,
+  ParcelResponseDto,
+} from '../dto/parcel-response.dto';
 import { PublicParcelResponseDto } from '../dto/public-parcel-response.dto';
 import { UpdateParcelStatusDto } from '../dto/update-parcel-status.dto';
 import { Parcel } from '../entities/parcel.entity';
@@ -129,12 +136,15 @@ export class ParcelController {
 
   @ApiBearerAuth(JWT_AUTH)
   @ApiOperation({ summary: 'Parcels you sent', description: 'Sender only.' })
-  @ApiResponse({ status: 200, type: [ParcelResponseDto] })
+  @ApiResponse({ status: 200, type: PaginatedParcelsDto })
   @UseGuards(JwtAuthGuard, RolesGuard)
   @Roles(Role.SENDER)
   @Get('my-parcels')
-  getMyParcels(@CurrentUser() user: User): Promise<Parcel[]> {
-    return this.parcelService.getMyParcels(user);
+  getMyParcels(
+    @CurrentUser() user: User,
+    @Query() query: QueryParcelsDto,
+  ): Promise<Paginated<Parcel>> {
+    return this.parcelService.getMyParcels(user, query);
   }
 
   @ApiBearerAuth(JWT_AUTH)
@@ -142,12 +152,15 @@ export class ParcelController {
     summary: 'Parcels on their way to you',
     description: 'Receiver only.',
   })
-  @ApiResponse({ status: 200, type: [ParcelResponseDto] })
+  @ApiResponse({ status: 200, type: PaginatedParcelsDto })
   @UseGuards(JwtAuthGuard, RolesGuard)
   @Roles(Role.RECEIVER)
   @Get('incoming-parcels')
-  getIncomingParcels(@CurrentUser() user: User): Promise<Parcel[]> {
-    return this.parcelService.getIncomingParcels(user);
+  getIncomingParcels(
+    @CurrentUser() user: User,
+    @Query() query: QueryParcelsDto,
+  ): Promise<Paginated<Parcel>> {
+    return this.parcelService.getIncomingParcels(user, query);
   }
 
   @ApiBearerAuth(JWT_AUTH)
@@ -155,12 +168,15 @@ export class ParcelController {
     summary: 'Parcels already delivered to you',
     description: 'Receiver only.',
   })
-  @ApiResponse({ status: 200, type: [ParcelResponseDto] })
+  @ApiResponse({ status: 200, type: PaginatedParcelsDto })
   @UseGuards(JwtAuthGuard, RolesGuard)
   @Roles(Role.RECEIVER)
   @Get('delivery-history')
-  getDeliveryHistory(@CurrentUser() user: User): Promise<Parcel[]> {
-    return this.parcelService.getDeliveryHistory(user);
+  getDeliveryHistory(
+    @CurrentUser() user: User,
+    @Query() query: QueryParcelsDto,
+  ): Promise<Paginated<Parcel>> {
+    return this.parcelService.getDeliveryHistory(user, query);
   }
 
   @ApiBearerAuth(JWT_AUTH)
@@ -215,12 +231,15 @@ export class ParcelController {
     description:
       'Delivery personnel only. Excludes delivered and cancelled parcels — this is the active queue.',
   })
-  @ApiResponse({ status: 200, type: [ParcelResponseDto] })
+  @ApiResponse({ status: 200, type: PaginatedParcelsDto })
   @UseGuards(JwtAuthGuard, RolesGuard)
   @Roles(Role.DELIVERY_PERSONNEL)
   @Get('assigned-parcels')
-  getAssignedParcels(@CurrentUser() user: User): Promise<Parcel[]> {
-    return this.parcelService.getAssignedParcels(user);
+  getAssignedParcels(
+    @CurrentUser() user: User,
+    @Query() query: QueryParcelsDto,
+  ): Promise<Paginated<Parcel>> {
+    return this.parcelService.getAssignedParcels(user, query);
   }
 
   @ApiBearerAuth(JWT_AUTH)
@@ -228,22 +247,48 @@ export class ParcelController {
     summary: 'Deliveries you completed',
     description: 'Delivery personnel only.',
   })
-  @ApiResponse({ status: 200, type: [ParcelResponseDto] })
+  @ApiResponse({ status: 200, type: PaginatedParcelsDto })
   @UseGuards(JwtAuthGuard, RolesGuard)
   @Roles(Role.DELIVERY_PERSONNEL)
   @Get('completed-deliveries')
-  getCompletedDeliveries(@CurrentUser() user: User): Promise<Parcel[]> {
-    return this.parcelService.getCompletedDeliveries(user);
+  getCompletedDeliveries(
+    @CurrentUser() user: User,
+    @Query() query: QueryParcelsDto,
+  ): Promise<Paginated<Parcel>> {
+    return this.parcelService.getCompletedDeliveries(user, query);
   }
 
   @ApiBearerAuth(JWT_AUTH)
   @ApiOperation({ summary: 'List every parcel', description: 'Admin only.' })
-  @ApiResponse({ status: 200, type: [ParcelResponseDto] })
+  @ApiResponse({ status: 200, type: PaginatedParcelsDto })
   @UseGuards(JwtAuthGuard, RolesGuard)
   @Roles(Role.ADMIN)
   @Get()
-  getAllParcels(): Promise<Parcel[]> {
-    return this.parcelService.getAllParcels();
+  getAllParcels(@Query() query: QueryParcelsDto): Promise<Paginated<Parcel>> {
+    return this.parcelService.getAllParcels(query);
+  }
+
+  @ApiBearerAuth(JWT_AUTH)
+  @ApiOperation({
+    summary: 'Submit proof of delivery',
+    description:
+      'Courier assigned to the parcel, or an admin. Records photos, who signed and any cash collected, and moves the parcel to DELIVERED.',
+  })
+  @ApiParam(TRACKING_ID)
+  @ApiResponse({ status: 200, type: ParcelResponseDto })
+  @ApiResponse({
+    status: 400,
+    description: 'Parcel cancelled, or cash on delivery not confirmed',
+  })
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(Role.ADMIN, Role.DELIVERY_PERSONNEL)
+  @Patch(':trackingId/delivery-proof')
+  submitDeliveryProof(
+    @Param('trackingId') trackingId: string,
+    @Body() payload: DeliveryProofDto,
+    @CurrentUser() user: User,
+  ): Promise<Parcel> {
+    return this.parcelService.submitDeliveryProof(trackingId, payload, user);
   }
 
   @ApiOperation({

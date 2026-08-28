@@ -6,6 +6,7 @@ import {
   Param,
   Patch,
   Post,
+  Query,
   UseGuards,
 } from '@nestjs/common';
 import {
@@ -24,9 +25,12 @@ import { RolesGuard } from '../../common/guards/roles.guard';
 import { AuthResponse } from '../../auth/types/auth.types';
 import { AuthResponseDto } from '../../auth/dto/auth-response.dto';
 import { JWT_AUTH } from '../../config/swagger.config';
+import { PaginationQueryDto } from '../../common/dto/pagination-query.dto';
+import { Paginated } from '../../common/types/paginated.type';
 import { CreateUserDto } from '../dto/create-user.dto';
+import { QueryUsersDto } from '../dto/query-users.dto';
 import { UpdateProfileDto } from '../dto/update-profile.dto';
-import { UserResponseDto } from '../dto/user-response.dto';
+import { PaginatedUsersDto, UserResponseDto } from '../dto/user-response.dto';
 import { User } from '../entities/user.entity';
 import { SafeUser } from '../types/safe-user.type';
 import { Role } from '../types/user.types';
@@ -82,13 +86,15 @@ export class UserController {
 
   @ApiBearerAuth(JWT_AUTH)
   @ApiOperation({ summary: 'List every user', description: 'Admin only.' })
-  @ApiResponse({ status: 200, type: [UserResponseDto] })
+  @ApiResponse({ status: 200, type: PaginatedUsersDto })
   @ApiResponse({ status: 403, description: 'Requester is not an admin' })
   @UseGuards(JwtAuthGuard, RolesGuard)
   @Roles(Role.ADMIN)
   @Get('all-users')
-  async getAllUsers(): Promise<SafeUser[]> {
-    return this.userService.getAllUsers();
+  async getAllUsers(
+    @Query() query: QueryUsersDto,
+  ): Promise<Paginated<SafeUser>> {
+    return this.userService.getAllUsers(query);
   }
 
   @ApiBearerAuth(JWT_AUTH)
@@ -96,12 +102,14 @@ export class UserController {
     summary: 'List courier applicants',
     description: 'Admin only. Accounts sitting in `PENDING_DELIVERY`.',
   })
-  @ApiResponse({ status: 200, type: [UserResponseDto] })
+  @ApiResponse({ status: 200, type: PaginatedUsersDto })
   @UseGuards(JwtAuthGuard, RolesGuard)
   @Roles(Role.ADMIN)
   @Get('delivery/pending')
-  async getPendingDeliveryPersonnel(): Promise<SafeUser[]> {
-    return this.userService.getPendingDeliveryPersonnel();
+  async getPendingDeliveryPersonnel(
+    @Query() query: PaginationQueryDto,
+  ): Promise<Paginated<SafeUser>> {
+    return this.userService.getPendingDeliveryPersonnel(query);
   }
 
   @ApiBearerAuth(JWT_AUTH)
@@ -109,12 +117,14 @@ export class UserController {
     summary: 'List approved couriers',
     description: 'Admin only. The pool to pick from when assigning a parcel.',
   })
-  @ApiResponse({ status: 200, type: [UserResponseDto] })
+  @ApiResponse({ status: 200, type: PaginatedUsersDto })
   @UseGuards(JwtAuthGuard, RolesGuard)
   @Roles(Role.ADMIN)
   @Get('delivery')
-  async getDeliveryPersonnel(): Promise<SafeUser[]> {
-    return this.userService.getDeliveryPersonnel();
+  async getDeliveryPersonnel(
+    @Query() query: PaginationQueryDto,
+  ): Promise<Paginated<SafeUser>> {
+    return this.userService.getDeliveryPersonnel(query);
   }
 
   @ApiBearerAuth(JWT_AUTH)

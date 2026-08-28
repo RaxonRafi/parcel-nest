@@ -20,6 +20,30 @@ sends.
 
 ---
 
+## Lists are paginated
+
+**Breaking change.** Every list endpoint used to return a bare array. They now
+return `{ data, meta }`:
+
+```ts
+type Paginated<T> = {
+  data: T[];
+  meta: { page, limit, total, totalPages, hasNext, hasPrev };
+};
+```
+
+Query params, on every list route: `page` (default 1) and `limit` (default 20,
+**max 100**). Unknown query params are rejected with a `400`, same as body
+fields.
+
+Parcel lists also accept `status`, `search` (partial, case-insensitive, matches
+tracking id / sender name / receiver name), `from` and `to` (ISO dates on
+`createdAt`), and — for admins — `isBlocked` and `unassigned`.
+
+User lists also accept `role`, `isActive` and `search` (matches name or email).
+
+---
+
 ## Shared shapes
 
 Referenced throughout so the tables stay readable.
@@ -64,6 +88,14 @@ type Parcel = {
   description: string | null;
   status: 'PENDING' | 'PICKED_UP' | 'IN_TRANSIT' | 'OUT_FOR_DELIVERY' | 'DELIVERED' | 'CANCELLED';
   isBlocked: boolean;
+  weightKg: number;               // kilograms
+  deliveryFee: number;            // computed server-side, never sent by the client
+  codAmount: number;              // cash to collect; 0 means prepaid
+  isCodCollected: boolean;
+  deliveryProofImages: string[];
+  deliveryProofNote: string | null;
+  receivedBy: string | null;      // who actually took it
+  deliveredAt: string | null;
   sender: User;
   receiver: User;
   deliveryPersonnel: User | null;   // assigned courier, null until assigned
@@ -121,6 +153,8 @@ Both tokens are JWTs carrying `{ userId, email, role }`.
 | Public | `POST` | `/api/auth/refresh-token` | `{ accessToken, refreshToken }` — rotated pair |
 | Public | `POST` | `/api/auth/forgot-password` | `{ message: string }` |
 | Public | `POST` | `/api/auth/reset-password` | `{ message: string }` |
+| Public | `POST` | `/api/auth/verify-email` | `{ message: string }` |
+| Public | `POST` | `/api/auth/resend-verification` | `{ message: string }` |
 | Any | `POST` | `/api/auth/logout` | `{ message: string }` |
 | Any | `POST` | `/api/auth/change-password` | `{ message: string }` |
 
@@ -145,18 +179,23 @@ token is single-use and expires after 30 minutes.
 | Public | `POST` | `/api/users/register` | `AuthResponse` |
 | Any | `GET` | `/api/users/me` | `User` |
 | Any | `PATCH` | `/api/users/update-profile` | `User` |
-| ADMIN | `GET` | `/api/users/all-users` | `User[]` — newest first |
+| ADMIN | `GET` | `/api/users/all-users` | `Paginated<User>` |
 | ADMIN | `GET` | `/api/users/:id` | `User` |
 | ADMIN | `PATCH` | `/api/users/:userId/block` | `User` — `isActive: "BLOCKED"` |
 | ADMIN | `PATCH` | `/api/users/:userId/unblock` | `User` — `isActive: "ACTIVE"` |
-| ADMIN | `GET` | `/api/users/delivery/pending` | `User[]` — courier applicants |
-| ADMIN | `GET` | `/api/users/delivery` | `User[]` — approved couriers |
+| ADMIN | `GET` | `/api/users/delivery/pending` | `Paginated<User>` — courier applicants |
+| ADMIN | `GET` | `/api/users/delivery` | `Paginated<User>` — approved couriers |
 | ADMIN | `PATCH` | `/api/users/:userId/delivery/approve` | `User` — `role: "DELIVERY_PERSONNEL"` |
 | ADMIN | `PATCH` | `/api/users/:userId/delivery/reject` | `User` — `role: "SENDER"` |
 
 `register` is public, but asking for `role: "ADMIN"` in the body additionally
 requires an existing admin's bearer token on the request. Any other role sent
 without a token is ignored and the account is created as `SENDER`.
+
+**New accounts start unverified.** `isVerified` is now `false` on creation and
+a confirmation email goes out; `POST /api/auth/verify-email` with the token
+flips it. No route currently *requires* a verified address — that is a
+one-line guard when you want it — but the flag now means something.
 
 Registering with `role: "DELIVERY_PERSONNEL"` creates the account as
 `PENDING_DELIVERY` instead. Those users can sign in and read `/api/users/me`,
@@ -171,18 +210,19 @@ them to `SENDER` so the account stays usable and they can apply again.
 | --- | --- | --- | --- |
 | Public | `GET` | `/api/parcels/:trackingId` | `PublicParcel` — trimmed, see below |
 | SENDER, ADMIN | `POST` | `/api/parcels` | `Parcel` |
-| SENDER | `GET` | `/api/parcels/my-parcels` | `Parcel[]` — newest first |
+| SENDER | `GET` | `/api/parcels/my-parcels` | `Paginated<Parcel>` |
 | SENDER | `PATCH` | `/api/parcels/:trackingId/cancel` | `Parcel` |
-| RECEIVER | `GET` | `/api/parcels/incoming-parcels` | `Parcel[]` — newest first |
-| RECEIVER | `GET` | `/api/parcels/delivery-history` | `Parcel[]` — by `updatedAt` desc |
+| RECEIVER | `GET` | `/api/parcels/incoming-parcels` | `Paginated<Parcel>` |
+| RECEIVER | `GET` | `/api/parcels/delivery-history` | `Paginated<Parcel>` — by `updatedAt` desc |
 | RECEIVER | `PATCH` | `/api/parcels/:trackingId/confirm` | `Parcel` |
-| ADMIN | `GET` | `/api/parcels` | `Parcel[]` — newest first |
+| ADMIN | `GET` | `/api/parcels` | `Paginated<Parcel>` |
 | ADMIN | `PATCH` | `/api/parcels/:trackingId/block` | `Parcel` |
 | ADMIN | `PATCH` | `/api/parcels/:trackingId/assign` | `Parcel` — body `{ deliveryPersonnelId }` |
 | ADMIN | `PATCH` | `/api/parcels/:trackingId/unassign` | `Parcel` |
 | ADMIN, DELIVERY_PERSONNEL | `PATCH` | `/api/parcels/:trackingId/status` | `Parcel` |
-| DELIVERY_PERSONNEL | `GET` | `/api/parcels/assigned-parcels` | `Parcel[]` — active queue |
-| DELIVERY_PERSONNEL | `GET` | `/api/parcels/completed-deliveries` | `Parcel[]` — by `updatedAt` desc |
+| ADMIN, DELIVERY_PERSONNEL | `PATCH` | `/api/parcels/:trackingId/delivery-proof` | `Parcel` |
+| DELIVERY_PERSONNEL | `GET` | `/api/parcels/assigned-parcels` | `Paginated<Parcel>` — active queue |
+| DELIVERY_PERSONNEL | `GET` | `/api/parcels/completed-deliveries` | `Paginated<Parcel>` — by `updatedAt` desc |
 
 > **Authenticated routes** return the full `Parcel`. Nested users
 > (`sender`, `receiver`, `deliveryPersonnel`, `statusLogs[].changedBy`) come
@@ -194,6 +234,19 @@ them to `SENDER` so the account stays usable and they can apply again.
 > and timeline, with no user records attached. Courier names in both
 > `deliveryPersonnelName` and the assignment status-log notes are reduced to a
 > first name.
+
+> **Pricing.** `deliveryFee` is calculated server-side from `weightKg` and
+> `codAmount` — the client sends weight, never a price. Rates are env-tunable
+> (`PRICING_BASE_FEE`, `PRICING_PER_KG_FEE`, `PRICING_INCLUDED_KG`,
+> `PRICING_COD_FEE_PERCENT`, `PRICING_MINIMUM_FEE`); defaults are a 60 base fee
+> covering the first kg, 25 per additional kg rounded up, plus 1% of any COD
+> amount.
+
+> **Proof of delivery.** `delivery-proof` takes `images` (1–5 URLs), optional
+> `receivedBy` and `note`, and `codCollected`. It moves the parcel to
+> `DELIVERED` and stamps `deliveredAt`. A parcel with `codAmount > 0` is
+> refused unless `codCollected` is true. Couriers may only submit for parcels
+> assigned to them.
 
 > **Courier rules.** `assign` requires an approved, active
 > `DELIVERY_PERSONNEL` and refuses blocked, delivered or cancelled parcels;
@@ -207,6 +260,18 @@ them to `SENDER` so the account stays usable and they can apply again.
 > is carrying their parcel. Both are still nullable: `deliveryPersonnel` is
 > `null` until an admin assigns someone, and `changedBy` is `null` on a log
 > entry whose author has since been deleted.
+
+### Emails sent
+
+| Trigger | Recipient |
+| --- | --- |
+| Account created | Confirmation link |
+| Parcel created for an unregistered receiver | Claim-your-account link (a reset grant — they have no password yet) |
+| Parcel reaches `PICKED_UP`, `OUT_FOR_DELIVERY`, `DELIVERED` or `CANCELLED` | Sender and receiver |
+| `forgot-password` | Reset link, 30 min, single use |
+
+Intermediate statuses are deliberately silent. Every send is fire-and-forget:
+a mail failure is logged and never fails the write that triggered it.
 
 ## Dashboard
 

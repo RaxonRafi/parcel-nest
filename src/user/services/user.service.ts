@@ -9,7 +9,11 @@ import {
 import { ConfigService } from '@nestjs/config';
 import { InjectRepository } from '@nestjs/typeorm';
 import * as bcrypt from 'bcryptjs';
-import { Repository } from 'typeorm';
+import { ILike, Repository } from 'typeorm';
+import { Paginated, paginate } from '../../common/types/paginated.type';
+import { EmailVerificationService } from '../../auth/services/email-verification.service';
+import { PaginationQueryDto } from '../../common/dto/pagination-query.dto';
+import { QueryUsersDto } from '../dto/query-users.dto';
 import { extractBearerToken } from '../../common/utils/jwt.util';
 import { TokenService } from '../../token/services/token.service';
 import { AuthResponse } from '../../auth/types/auth.types';
@@ -39,6 +43,7 @@ export class UserService {
     private readonly userRepository: Repository<User>,
     private readonly configService: ConfigService,
     private readonly tokenService: TokenService,
+    private readonly emailVerificationService: EmailVerificationService,
   ) {}
 
   // ─── Bootstrapping ────────────────────────────────────────────────────────
@@ -125,7 +130,9 @@ export class UserService {
       email,
       password: await this.hashPassword(password),
       role: this.resolveUserRole(role),
-      isVerified: true,
+      // Unverified until the emailed link is opened. `isVerified` used to be
+      // hardcoded true, which made the column meaningless.
+      isVerified: false,
       auths: [
         {
           provider: AuthProviderType.CREDENTIALS,
@@ -135,21 +142,30 @@ export class UserService {
       ...rest,
     });
 
-    return this.userRepository.save(user);
+    const saved = await this.userRepository.save(user);
+
+    // Issued here rather than in `register` so an account created through any
+    // path gets its confirmation link. Fire-and-forget: the service swallows
+    // delivery failures, so a mail outage cannot fail account creation.
+    await this.emailVerificationService.issue(saved);
+
+    return saved;
   }
 
   /**
    * Looks up a parcel receiver, creating a placeholder account when the email
    * is not registered yet. Called by ParcelService.
    */
-  async findOrCreateReceiver(payload: CreateReceiverDto): Promise<User> {
+  async findOrCreateReceiver(
+    payload: CreateReceiverDto,
+  ): Promise<{ user: User; created: boolean }> {
     const email = payload.email.toLowerCase().trim();
     const existing = await this.userRepository.findOne({
       where: { email, isDeleted: false },
     });
 
     if (existing) {
-      return existing;
+      return { user: existing, created: false };
     }
 
     const receiver = this.userRepository.create({
@@ -162,7 +178,7 @@ export class UserService {
       isDeleted: false,
     });
 
-    return this.userRepository.save(receiver);
+    return { user: await this.userRepository.save(receiver), created: true };
   }
 
   // ─── Reads ────────────────────────────────────────────────────────────────
@@ -192,22 +208,43 @@ export class UserService {
     return this.getUserById(userId);
   }
 
-  async getAllUsers(): Promise<SafeUser[]> {
-    const users = await this.userRepository.find({
-      where: { isDeleted: false },
+  async getAllUsers(query: QueryUsersDto): Promise<Paginated<SafeUser>> {
+    const filters: Record<string, unknown> = { isDeleted: false };
+
+    if (query.role) filters.role = query.role;
+    if (query.isActive) filters.isActive = query.isActive;
+
+    // An array of conditions is ORed, so one term can match name or email
+    // while every other filter still applies to both branches.
+    const where = query.search
+      ? [
+          { ...filters, name: ILike(`%${query.search}%`) },
+          { ...filters, email: ILike(`%${query.search}%`) },
+        ]
+      : filters;
+
+    const [users, total] = await this.userRepository.findAndCount({
+      where: where as never,
       order: { createdAt: 'DESC' },
+      skip: query.skip,
+      take: query.limit,
     });
-    return users.map(sanitizeUser);
+
+    return paginate(users.map(sanitizeUser), total, query.page, query.limit);
   }
 
   /** Couriers waiting on an admin decision. */
-  async getPendingDeliveryPersonnel(): Promise<SafeUser[]> {
-    return this.findByRole(Role.PENDING_DELIVERY);
+  async getPendingDeliveryPersonnel(
+    query: PaginationQueryDto,
+  ): Promise<Paginated<SafeUser>> {
+    return this.findByRole(Role.PENDING_DELIVERY, query);
   }
 
   /** Approved couriers — the pool an admin assigns parcels from. */
-  async getDeliveryPersonnel(): Promise<SafeUser[]> {
-    return this.findByRole(Role.DELIVERY_PERSONNEL);
+  async getDeliveryPersonnel(
+    query: PaginationQueryDto,
+  ): Promise<Paginated<SafeUser>> {
+    return this.findByRole(Role.DELIVERY_PERSONNEL, query);
   }
 
   /**
@@ -284,6 +321,12 @@ export class UserService {
    * to `DELIVERY_PERSONNEL`; rejecting drops it back to `SENDER` so the person
    * keeps a usable account and can re-apply.
    */
+  async markVerified(userId: string): Promise<SafeUser> {
+    const user = await this.findEntityByIdOrFail(userId);
+    user.isVerified = true;
+    return sanitizeUser(await this.userRepository.save(user));
+  }
+
   async setDeliveryApproval(
     userId: string,
     approved: boolean,
@@ -367,12 +410,18 @@ export class UserService {
 
   // ─── Internals ────────────────────────────────────────────────────────────
 
-  private async findByRole(role: Role): Promise<SafeUser[]> {
-    const users = await this.userRepository.find({
+  private async findByRole(
+    role: Role,
+    query: PaginationQueryDto,
+  ): Promise<Paginated<SafeUser>> {
+    const [users, total] = await this.userRepository.findAndCount({
       where: { role, isDeleted: false },
       order: { createdAt: 'DESC' },
+      skip: query.skip,
+      take: query.limit,
     });
-    return users.map(sanitizeUser);
+
+    return paginate(users.map(sanitizeUser), total, query.page, query.limit);
   }
 
   private async hashPassword(plainPassword: string): Promise<string> {

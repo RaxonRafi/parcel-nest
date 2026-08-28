@@ -1,7 +1,10 @@
 import { Test, TestingModule } from '@nestjs/testing';
 import { BadRequestException, ForbiddenException } from '@nestjs/common';
 import { getRepositoryToken } from '@nestjs/typeorm';
+import { ConfigService } from '@nestjs/config';
+import { PasswordResetService } from '../../auth/services/password-reset.service';
 import { RagService } from '../../rag/services/rag.service';
+import { ParcelNotificationService } from './parcel-notification.service';
 import { UserService } from '../../user/services/user.service';
 import { User } from '../../user/entities/user.entity';
 import { Role } from '../../user/types/user.types';
@@ -62,6 +65,12 @@ describe('ParcelService — delivery personnel', () => {
         },
         { provide: UserService, useValue: userService },
         { provide: RagService, useValue: { indexParcel: jest.fn() } },
+        {
+          provide: ParcelNotificationService,
+          useValue: { notifyStatusChange: jest.fn() },
+        },
+        { provide: ConfigService, useValue: { get: jest.fn() } },
+        { provide: PasswordResetService, useValue: { issueClaim: jest.fn() } },
       ],
     }).compile();
 
