@@ -1,5 +1,7 @@
 import { join } from 'path';
 import { DataSourceOptions } from 'typeorm';
+import { PasswordReset } from '../auth/entities/password-reset.entity';
+import { RefreshToken } from '../auth/entities/refresh-token.entity';
 import { AuthProvider } from '../user/entities/auth-provider.entity';
 import { User } from '../user/entities/user.entity';
 import { ParcelStatusLog } from '../parcel/entities/parcel-status-log.entity';
@@ -10,7 +12,14 @@ import { Parcel } from '../parcel/entities/parcel.entity';
  * config keeps working when the app is bundled (Vercel) and when it runs from
  * `dist/` or through ts-node (the migration CLI).
  */
-export const ENTITIES = [User, AuthProvider, Parcel, ParcelStatusLog];
+export const ENTITIES = [
+  User,
+  AuthProvider,
+  Parcel,
+  ParcelStatusLog,
+  RefreshToken,
+  PasswordReset,
+];
 
 export const MIGRATIONS_DIR = join(__dirname, '..', 'database', 'migrations');
 

@@ -118,12 +118,25 @@ Both tokens are JWTs carrying `{ userId, email, role }`.
 | Role | Method | Endpoint | Response |
 | --- | --- | --- | --- |
 | Public | `POST` | `/api/auth/login` | `AuthResponse` |
-| Public | `POST` | `/api/auth/refresh-token` | `{ accessToken: string }` |
-| Any | `POST` | `/api/auth/logout` | `{ message: "Logged out successfully" }` |
-| Any | `POST` | `/api/auth/change-password` | `{ message: "Password changed successfully" }` |
+| Public | `POST` | `/api/auth/refresh-token` | `{ accessToken, refreshToken }` — rotated pair |
+| Public | `POST` | `/api/auth/forgot-password` | `{ message: string }` |
+| Public | `POST` | `/api/auth/reset-password` | `{ message: string }` |
+| Any | `POST` | `/api/auth/logout` | `{ message: string }` |
+| Any | `POST` | `/api/auth/change-password` | `{ message: string }` |
 
-`logout` is stateless — it returns a message and nothing else. Clearing the
-stored token is the frontend's job; the old token stays valid until it expires.
+**Sessions are now server-side.** Each refresh token is recorded and can be
+revoked, so:
+
+- `refresh-token` **rotates**: the token you send is revoked and a new pair
+  returned. Store both from the response — reusing the old one gets a `401`.
+- `logout` revokes the `refreshToken` you pass in the body, or **every** session
+  for the user when the body is omitted. The access token stays valid until it
+  expires (15 minutes) — that is the residual window.
+- `change-password` and `reset-password` both end every session.
+
+`forgot-password` always returns the same message whether or not the address has
+an account, so it cannot be used to discover who is registered. The emailed
+token is single-use and expires after 30 minutes.
 
 ## Users
 
@@ -216,19 +229,18 @@ them to `SENDER` so the account stays usable and they can apply again.
 
 | Role | Method | Endpoint | Response |
 | --- | --- | --- | --- |
-| Public | `POST` | `/api/rag/ask` | `{ answer: string; sources: { type, source, page }[] }` |
-| Public | `POST` | `/api/rag/pdf/upload` | `{ message, filename, chunksIndexed }` |
-| Public | `DELETE` | `/api/rag/pdf/:source` | `{ message: string }` |
-| Public | `POST` | `/api/rag/index/parcel` | `{ message: string }` |
-| Public | `POST` | `/api/rag/index/bulk` | `{ message: string }` |
-| Public | `DELETE` | `/api/rag/index/parcel/:id` | `{ message: string }` |
+| Any | `POST` | `/api/rag/ask` | `{ answer: string; sources: { type, source, page }[] }` |
+| ADMIN | `POST` | `/api/rag/pdf/upload` | `{ message, filename, chunksIndexed }` |
+| ADMIN | `DELETE` | `/api/rag/pdf/:source` | `{ message: string }` |
+| ADMIN | `POST` | `/api/rag/index/parcel` | `{ message: string }` |
+| ADMIN | `POST` | `/api/rag/index/bulk` | `{ message: string }` |
+| ADMIN | `DELETE` | `/api/rag/index/parcel/:id` | `{ message: string }` |
 
 `pdf/upload` is `multipart/form-data` with a `file` field (PDF only, 10 MB max)
 and an optional `category`. `sources[].page` is `null` for non-PDF sources.
 
-> These carry no guards at all today — including the two `DELETE` routes that
-> drop documents from the vector store. Worth locking down before the frontend
-> ships.
+> Index-mutating routes are admin-only. `ask` needs any signed-in user rather
+> than being public, because each call bills an embedding and a completion.
 
 ## System
 
@@ -252,11 +264,25 @@ Standard Nest error envelope on every failure:
 
 | Code | When |
 | --- | --- |
-| `400` | Bad input, illegal parcel status transition, blocked/inactive account at login |
+| `400` | Failed validation, illegal parcel status transition, blocked/inactive account at login, expired reset token |
 | `401` | Missing, malformed, or expired token; wrong password |
 | `403` | Wrong role for the route; a courier touching a parcel that is not theirs, or setting a status couriers may not set |
 | `404` | No such user or tracking id |
 | `409` | Email already registered |
+| `429` | Rate limit hit — 120 req/min generally, 8/min on auth routes, 20/min on AI routes |
 
-There is no request validation layer yet, so malformed bodies generally surface
-as `500`s from the database rather than a clean `400`.
+**Request bodies are validated.** A bad payload comes back as `400` with
+`message` as an array of strings, one per failed rule:
+
+```json
+{ "statusCode": 400, "message": ["A valid email address is required"], "error": "Bad Request" }
+```
+
+Unknown properties are rejected rather than ignored, so a misspelled field
+fails loudly: `["property extraField should not exist"]`.
+
+**Parcel status follows a state machine.** Legal moves are
+`PENDING → PICKED_UP → IN_TRANSIT → OUT_FOR_DELIVERY → DELIVERED`, with
+`IN_TRANSIT → DELIVERED` allowed for routes without a separate final leg, and
+`CANCELLED` reachable from any non-final state. `DELIVERED` and `CANCELLED` are
+terminal. Anything else is a `400` naming the moves that were allowed.

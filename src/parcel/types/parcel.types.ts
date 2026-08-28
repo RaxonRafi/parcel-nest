@@ -7,6 +7,32 @@ export enum ParcelStatus {
   CANCELLED = 'CANCELLED',
 }
 
+/**
+ * Legal next states for each status. Previously `updateStatus` accepted any
+ * value, so a parcel could jump PENDING → DELIVERED or move backwards out of
+ * DELIVERED, leaving a history that contradicted itself.
+ *
+ * IN_TRANSIT may go straight to DELIVERED: not every route has a separate
+ * out-for-delivery leg. DELIVERED and CANCELLED are terminal.
+ */
+export const PARCEL_STATUS_TRANSITIONS: Readonly<
+  Record<ParcelStatus, readonly ParcelStatus[]>
+> = {
+  [ParcelStatus.PENDING]: [ParcelStatus.PICKED_UP, ParcelStatus.CANCELLED],
+  [ParcelStatus.PICKED_UP]: [ParcelStatus.IN_TRANSIT, ParcelStatus.CANCELLED],
+  [ParcelStatus.IN_TRANSIT]: [
+    ParcelStatus.OUT_FOR_DELIVERY,
+    ParcelStatus.DELIVERED,
+    ParcelStatus.CANCELLED,
+  ],
+  [ParcelStatus.OUT_FOR_DELIVERY]: [
+    ParcelStatus.DELIVERED,
+    ParcelStatus.CANCELLED,
+  ],
+  [ParcelStatus.DELIVERED]: [],
+  [ParcelStatus.CANCELLED]: [],
+};
+
 export interface ParcelStats {
   totalParcels: number;
   blockedParcels: number;

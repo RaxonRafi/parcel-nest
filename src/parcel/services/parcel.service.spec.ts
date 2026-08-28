@@ -1,6 +1,7 @@
 import { Test, TestingModule } from '@nestjs/testing';
 import { BadRequestException, ForbiddenException } from '@nestjs/common';
 import { getRepositoryToken } from '@nestjs/typeorm';
+import { RagService } from '../../rag/services/rag.service';
 import { UserService } from '../../user/services/user.service';
 import { User } from '../../user/entities/user.entity';
 import { Role } from '../../user/types/user.types';
@@ -60,6 +61,7 @@ describe('ParcelService — delivery personnel', () => {
           useValue: statusLogRepository,
         },
         { provide: UserService, useValue: userService },
+        { provide: RagService, useValue: { indexParcel: jest.fn() } },
       ],
     }).compile();
 
@@ -139,6 +141,53 @@ describe('ParcelService — delivery personnel', () => {
       );
 
       expect(parcel.status).toBe(ParcelStatus.CANCELLED);
+    });
+  });
+
+  describe('status transitions', () => {
+    const move = (from: ParcelStatus, to: ParcelStatus) => {
+      const parcel = buildParcel({ status: from, deliveryPersonnel: null });
+      parcelRepository.findOne.mockResolvedValue(parcel);
+      parcelRepository.save.mockResolvedValue(parcel);
+      return service.updateStatus('TRK-TEST', { status: to }, admin);
+    };
+
+    it.each([
+      [ParcelStatus.PENDING, ParcelStatus.PICKED_UP],
+      [ParcelStatus.PICKED_UP, ParcelStatus.IN_TRANSIT],
+      [ParcelStatus.IN_TRANSIT, ParcelStatus.OUT_FOR_DELIVERY],
+      [ParcelStatus.IN_TRANSIT, ParcelStatus.DELIVERED],
+      [ParcelStatus.OUT_FOR_DELIVERY, ParcelStatus.DELIVERED],
+      [ParcelStatus.PENDING, ParcelStatus.CANCELLED],
+    ])('allows %s → %s', async (from, to) => {
+      await expect(move(from, to)).resolves.toBeDefined();
+    });
+
+    it('refuses the PENDING → DELIVERED jump', async () => {
+      await expect(
+        move(ParcelStatus.PENDING, ParcelStatus.DELIVERED),
+      ).rejects.toBeInstanceOf(BadRequestException);
+    });
+
+    it('refuses to move backwards', async () => {
+      await expect(
+        move(ParcelStatus.OUT_FOR_DELIVERY, ParcelStatus.PENDING),
+      ).rejects.toBeInstanceOf(BadRequestException);
+    });
+
+    it.each([ParcelStatus.DELIVERED, ParcelStatus.CANCELLED])(
+      'treats %s as final',
+      async (terminal) => {
+        await expect(move(terminal, ParcelStatus.IN_TRANSIT)).rejects.toThrow(
+          /final status/,
+        );
+      },
+    );
+
+    it('refuses a no-op transition', async () => {
+      await expect(
+        move(ParcelStatus.IN_TRANSIT, ParcelStatus.IN_TRANSIT),
+      ).rejects.toThrow(/already IN_TRANSIT/);
     });
   });
 

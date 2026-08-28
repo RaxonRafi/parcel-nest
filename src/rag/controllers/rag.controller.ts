@@ -6,10 +6,12 @@ import {
   Param,
   Post,
   UploadedFile,
+  UseGuards,
   UseInterceptors,
 } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
 import {
+  ApiBearerAuth,
   ApiBody,
   ApiConsumes,
   ApiOperation,
@@ -17,7 +19,13 @@ import {
   ApiResponse,
   ApiTags,
 } from '@nestjs/swagger';
+import { Throttle } from '@nestjs/throttler';
 import multer from 'multer';
+import { Roles } from '../../common/decorators/roles.decorator';
+import { JwtAuthGuard } from '../../common/guards/jwt-auth.guard';
+import { RolesGuard } from '../../common/guards/roles.guard';
+import { JWT_AUTH } from '../../config/swagger.config';
+import { Role } from '../../user/types/user.types';
 import * as fs from 'fs';
 import { AskDto } from '../dto/ask.dto';
 import { IndexBulkDto } from '../dto/index-bulk.dto';
@@ -42,12 +50,16 @@ export class RagController {
 
   @ApiOperation({
     summary: 'Upload a PDF and index it',
-    description: 'PDF only, 10 MB maximum.',
+    description: 'Admin only. PDF only, 10 MB maximum.',
   })
   @ApiConsumes('multipart/form-data')
   @ApiBody({ type: UploadPdfFormDto })
   @ApiResponse({ status: 201, type: PdfIngestResponseDto })
   @ApiResponse({ status: 400, description: 'Missing file or non-PDF upload' })
+  @ApiBearerAuth(JWT_AUTH)
+  @ApiResponse({ status: 403, description: 'Requester is not an admin' })
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(Role.ADMIN)
   @Post('pdf/upload')
   @UseInterceptors(
     FileInterceptor('file', {
@@ -97,9 +109,16 @@ export class RagController {
 
   // ─── Delete PDF ───────────────────────────────────────────────────────────
 
-  @ApiOperation({ summary: 'Drop an indexed PDF from the vector store' })
+  @ApiOperation({
+    summary: 'Drop an indexed PDF from the vector store',
+    description: 'Admin only.',
+  })
   @ApiParam({ name: 'source', example: 'delivery-policy.pdf' })
   @ApiResponse({ status: 200, type: RagMessageResponseDto })
+  @ApiBearerAuth(JWT_AUTH)
+  @ApiResponse({ status: 403, description: 'Requester is not an admin' })
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(Role.ADMIN)
   @Delete('pdf/:source')
   async deletePDF(@Param('source') source: string) {
     await this.ragService.deletePDF(source);
@@ -108,9 +127,16 @@ export class RagController {
 
   // ─── Ask a question ───────────────────────────────────────────────────────
 
-  @ApiOperation({ summary: 'Ask a question over the indexed documents' })
+  @ApiOperation({
+    summary: 'Ask a question over the indexed documents',
+    description:
+      'Any signed-in user. Each call bills an embedding and a completion, so it is not public.',
+  })
   @ApiResponse({ status: 201, type: RagAnswerDto })
   @ApiResponse({ status: 400, description: 'Question is required' })
+  @ApiBearerAuth(JWT_AUTH)
+  @UseGuards(JwtAuthGuard)
+  @Throttle({ ai: { limit: 20, ttl: 60_000 } })
   @Post('ask')
   ask(@Body() body: AskDto): Promise<RagAnswer> {
     if (!body.question) throw new BadRequestException('Question is required');
@@ -119,8 +145,15 @@ export class RagController {
 
   // ─── Index single parcel ──────────────────────────────────────────────────
 
-  @ApiOperation({ summary: 'Index a single parcel' })
+  @ApiOperation({
+    summary: 'Index a single parcel',
+    description: 'Admin only.',
+  })
   @ApiResponse({ status: 201, type: RagMessageResponseDto })
+  @ApiBearerAuth(JWT_AUTH)
+  @ApiResponse({ status: 403, description: 'Requester is not an admin' })
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(Role.ADMIN)
   @Post('index/parcel')
   async indexParcel(@Body() parcel: IndexParcelDto) {
     await this.ragService.indexParcel(parcel);
@@ -129,9 +162,17 @@ export class RagController {
 
   // ─── Bulk index parcels ───────────────────────────────────────────────────
 
-  @ApiOperation({ summary: 'Index many parcels at once' })
+  @ApiOperation({
+    summary: 'Index many parcels at once',
+    description: 'Admin only.',
+  })
   @ApiResponse({ status: 201, type: RagMessageResponseDto })
   @ApiResponse({ status: 400, description: 'No parcels provided' })
+  @ApiBearerAuth(JWT_AUTH)
+  @ApiResponse({ status: 403, description: 'Requester is not an admin' })
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(Role.ADMIN)
+  @Throttle({ ai: { limit: 20, ttl: 60_000 } })
   @Post('index/bulk')
   async indexBulk(@Body() body: IndexBulkDto) {
     if (!body.parcels?.length) {
@@ -147,9 +188,16 @@ export class RagController {
 
   // ─── Delete parcel ────────────────────────────────────────────────────────
 
-  @ApiOperation({ summary: 'Drop an indexed parcel from the vector store' })
+  @ApiOperation({
+    summary: 'Drop an indexed parcel from the vector store',
+    description: 'Admin only.',
+  })
   @ApiParam({ name: 'id', format: 'uuid' })
   @ApiResponse({ status: 200, type: RagMessageResponseDto })
+  @ApiBearerAuth(JWT_AUTH)
+  @ApiResponse({ status: 403, description: 'Requester is not an admin' })
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(Role.ADMIN)
   @Delete('index/parcel/:id')
   async deleteParcel(@Param('id') id: string) {
     await this.ragService.deleteParcel(id);

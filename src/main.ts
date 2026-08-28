@@ -1,4 +1,4 @@
-import { INestApplication } from '@nestjs/common';
+import { INestApplication, ValidationPipe } from '@nestjs/common';
 import { NestFactory } from '@nestjs/core';
 import { AppModule } from './app.module';
 import { setupSwagger } from './config/swagger.config';
@@ -15,6 +15,19 @@ async function bootstrap(): Promise<INestApplication> {
   await userService.seedSuperAdmin();
 
   app.setGlobalPrefix('api');
+  app.useGlobalPipes(
+    new ValidationPipe({
+      // Drop unknown keys instead of letting them reach a service, and reject
+      // the request outright when the caller sends one — silently ignoring a
+      // misspelled field is how bugs stay hidden.
+      whitelist: true,
+      forbidNonWhitelisted: true,
+      // Bodies arrive as JSON, so payloads need converting to DTO instances
+      // before class-validator's type checks mean anything.
+      transform: true,
+      transformOptions: { enableImplicitConversion: false },
+    }),
+  );
   app.enableCors({
     origin: process.env.CORS_ORIGIN?.split(',') ?? [
       'http://localhost:3001',

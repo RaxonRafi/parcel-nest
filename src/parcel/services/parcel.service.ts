@@ -9,6 +9,7 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { In, Not, Repository } from 'typeorm';
 import { firstName } from '../../common/utils/name.util';
 import { User } from '../../user/entities/user.entity';
+import { RagService } from '../../rag/services/rag.service';
 import { UserService } from '../../user/services/user.service';
 import { Role } from '../../user/types/user.types';
 import { CreateParcelDto } from '../dto/create-parcel.dto';
@@ -18,6 +19,7 @@ import { Parcel } from '../entities/parcel.entity';
 import { toPublicParcel } from '../utils/public-parcel.util';
 import { sanitizeParcel, sanitizeParcels } from '../utils/sanitize-parcel.util';
 import {
+  PARCEL_STATUS_TRANSITIONS,
   ParcelIndexDocument,
   ParcelStats,
   ParcelStatus,
@@ -63,6 +65,7 @@ export class ParcelService {
     @InjectRepository(ParcelStatusLog)
     private readonly statusLogRepository: Repository<ParcelStatusLog>,
     private readonly userService: UserService,
+    private readonly ragService: RagService,
   ) {}
 
   async create(sender: User, payload: CreateParcelDto): Promise<Parcel> {
@@ -115,13 +118,11 @@ export class ParcelService {
       throw new BadRequestException('Parcel is blocked');
     }
 
-    if (parcel.status === ParcelStatus.CANCELLED) {
-      throw new BadRequestException('Cannot update a cancelled parcel');
-    }
-
     if (actor.role === Role.DELIVERY_PERSONNEL) {
       this.assertCourierMaySetStatus(parcel, payload.status, actor);
     }
+
+    this.assertTransitionAllowed(parcel.status, payload.status);
 
     parcel.status = payload.status;
     await this.parcelRepository.save(parcel);
@@ -226,9 +227,7 @@ export class ParcelService {
       throw new ForbiddenException('You can only cancel your own parcels');
     }
 
-    if (parcel.status === ParcelStatus.DELIVERED) {
-      throw new BadRequestException('Delivered parcels cannot be cancelled');
-    }
+    this.assertTransitionAllowed(parcel.status, ParcelStatus.CANCELLED);
 
     parcel.status = ParcelStatus.CANCELLED;
     await this.parcelRepository.save(parcel);
@@ -248,6 +247,8 @@ export class ParcelService {
     if (parcel.receiver.id !== receiver.id) {
       throw new ForbiddenException('You can only confirm your own parcels');
     }
+
+    this.assertTransitionAllowed(parcel.status, ParcelStatus.DELIVERED);
 
     parcel.status = ParcelStatus.DELIVERED;
     await this.parcelRepository.save(parcel);
@@ -380,6 +381,22 @@ export class ParcelService {
     );
   }
 
+  private assertTransitionAllowed(from: ParcelStatus, to: ParcelStatus): void {
+    if (from === to) {
+      throw new BadRequestException(`Parcel is already ${from}`);
+    }
+
+    const allowed = PARCEL_STATUS_TRANSITIONS[from] ?? [];
+
+    if (!allowed.includes(to)) {
+      throw new BadRequestException(
+        allowed.length
+          ? `Cannot move a parcel from ${from} to ${to}. Allowed: ${allowed.join(', ')}`
+          : `${from} is a final status and cannot be changed`,
+      );
+    }
+  }
+
   private assertCourierMaySetStatus(
     parcel: Parcel,
     status: ParcelStatus,
@@ -452,15 +469,14 @@ export class ParcelService {
   }
 
   /**
-   * Fire-and-forget re-index. Kept as an HTTP call to /api/rag/index/parcel so
-   * parcel writes stay usable when the RAG providers are not configured.
+   * Fire-and-forget re-index. This used to POST to `/api/rag/index/parcel`
+   * over HTTP, which only worked because that route was unauthenticated —
+   * guarding it turned the self-call into a 401. Calling `RagService`
+   * directly removes the hole along with a network hop, and the catch keeps a
+   * failing vector store from failing the parcel write.
    */
   private async triggerParcelIndex(parcel: Parcel): Promise<void> {
     const latestNote = parcel.statusLogs?.[parcel.statusLogs.length - 1]?.note;
-    const baseUrl =
-      process.env.INTERNAL_API_BASE_URL ??
-      process.env.APP_URL ??
-      `http://localhost:${process.env.PORT ?? 3000}`;
 
     const document: ParcelIndexDocument = {
       id: parcel.id,
@@ -474,22 +490,11 @@ export class ParcelService {
     };
 
     try {
-      const response = await fetch(`${baseUrl}/api/rag/index/parcel`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(document),
-      });
-
-      if (!response.ok) {
-        const errorBody = await response.text();
-        this.logger.warn(
-          `RAG indexing failed for ${parcel.trackingId}: ${response.status} ${errorBody}`,
-        );
-      }
+      await this.ragService.indexParcel(document);
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Unknown error';
       this.logger.warn(
-        `RAG indexing request failed for ${parcel.trackingId}: ${message}`,
+        `RAG indexing failed for ${parcel.trackingId}: ${message}`,
       );
     }
   }

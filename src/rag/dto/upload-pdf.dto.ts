@@ -1,7 +1,11 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
+import { IsOptional, IsString, MaxLength } from 'class-validator';
 
 export class UploadPdfDto {
   @ApiPropertyOptional({ default: 'general', example: 'policy' })
+  @IsOptional()
+  @IsString()
+  @MaxLength(100)
   category?: string;
 }
 

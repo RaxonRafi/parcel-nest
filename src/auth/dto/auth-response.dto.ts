@@ -12,9 +12,15 @@ export class AuthResponseDto {
   refreshToken!: string;
 }
 
-export class AccessTokenResponseDto {
-  @ApiProperty()
+export class TokenPairResponseDto {
+  @ApiProperty({ description: 'Paste this into the Authorize dialog.' })
   accessToken!: string;
+
+  @ApiProperty({
+    description:
+      'Replaces the token you sent — the old one is revoked. Store it.',
+  })
+  refreshToken!: string;
 }
 
 export class MessageResponseDto {
