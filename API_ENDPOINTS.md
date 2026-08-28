@@ -277,7 +277,8 @@ a mail failure is logged and never fails the write that triggered it.
 
 | Role | Method | Endpoint | Response |
 | --- | --- | --- | --- |
-| ADMIN | `GET` | `/api/dashboard` | see below |
+| ADMIN | `GET` | `/api/dashboard` | counts, see below |
+| ADMIN | `GET` | `/api/dashboard/trends` | volume, timing and throughput |
 
 ```ts
 {
@@ -290,11 +291,68 @@ a mail failure is logged and never fails the write that triggered it.
 }
 ```
 
+`GET /api/dashboard/trends?days=30` (1–365, default 30) adds everything the
+counts cannot tell you — direction, timing, who is carrying the load:
+
+```ts
+{
+  rangeDays: number;
+  daily: { date: string; created: number; delivered: number }[];   // zero-filled, one row per day
+  statusTimings: { status: ParcelStatus; averageHours: number | null; sampleSize: number }[];
+  courierThroughput: {
+    courierId: string; courierName: string;
+    active: number; delivered: number;
+    averageDeliveryHours: number | null;
+  }[];
+  revenue: {
+    deliveryFeesBooked: number;      // everything not cancelled
+    deliveryFeesDelivered: number;   // actually earned
+    codOutstanding: number;          // cash still to collect
+    codCollected: number;
+  };
+  averageFulfilmentHours: number | null;   // creation → delivery
+}
+```
+
+`statusTimings` measures *completed* dwell time, computed from consecutive
+status-log entries — a parcel currently sitting in a status has no next entry
+yet and is excluded, so a status with `sampleSize: 0` means nothing has left it,
+not that it is instant.
+
+## Audit
+
+| Role | Method | Endpoint | Response |
+| --- | --- | --- | --- |
+| ADMIN | `GET` | `/api/audit-logs` | `Paginated<AuditLog>` |
+| ADMIN | `GET` | `/api/audit-logs/target/:targetId` | `Paginated<AuditLog>` |
+
+```ts
+type AuditLog = {
+  id: string;
+  actorEmail: string | null;   // null once the acting account is deleted
+  action: 'USER_BLOCKED' | 'USER_UNBLOCKED' | 'DELIVERY_APPROVED' | 'DELIVERY_REJECTED'
+        | 'PARCEL_BLOCKED' | 'PARCEL_ASSIGNED' | 'PARCEL_UNASSIGNED' | 'PARCEL_STATUS_CHANGED';
+  targetType: 'USER' | 'PARCEL';
+  targetId: string;            // user uuid, or parcel tracking id
+  summary: string | null;      // readable without a join
+  metadata: Record<string, unknown> | null;   // usually { from, to }
+  createdAt: string;
+};
+```
+
+Filters: `action`, `targetType`, `targetId`. The `target/:targetId` route is the
+full history of one user or parcel, newest first.
+
+> Writes are best-effort by design: if the audit insert fails it is logged
+> loudly and the audited action still succeeds. A missing log line is bad; a
+> block that silently failed because logging was down is worse.
+
 ## RAG
 
 | Role | Method | Endpoint | Response |
 | --- | --- | --- | --- |
 | Any | `POST` | `/api/rag/ask` | `{ answer: string; sources: { type, source, page }[] }` |
+| Any | `POST` | `/api/rag/ask/stream` | `text/event-stream`, see below |
 | ADMIN | `POST` | `/api/rag/pdf/upload` | `{ message, filename, chunksIndexed }` |
 | ADMIN | `DELETE` | `/api/rag/pdf/:source` | `{ message: string }` |
 | ADMIN | `POST` | `/api/rag/index/parcel` | `{ message: string }` |
@@ -303,6 +361,23 @@ a mail failure is logged and never fails the write that triggered it.
 
 `pdf/upload` is `multipart/form-data` with a `file` field (PDF only, 10 MB max)
 and an optional `category`. `sources[].page` is `null` for non-PDF sources.
+
+`ask/stream` takes the same body and returns server-sent events. Sources arrive
+first so attribution can render before the prose finishes:
+
+```
+data: {"type":"sources","sources":[{"type":"pdf","source":"policy.pdf","page":4}]}
+
+data: {"type":"token","token":"Your"}
+
+data: {"type":"token","token":" parcel"}
+
+data: {"type":"done"}
+```
+
+Exactly one `done` or `{"type":"error","message":string}` terminates the stream.
+Errors arrive as events rather than an HTTP status, because the headers have
+already been sent by then. Closing the connection stops token generation.
 
 > Index-mutating routes are admin-only. `ask` needs any signed-in user rather
 > than being public, because each call bills an embedding and a completion.

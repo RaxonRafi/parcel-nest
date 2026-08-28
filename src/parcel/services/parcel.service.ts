@@ -18,6 +18,13 @@ import {
 } from 'typeorm';
 import { ConfigService } from '@nestjs/config';
 import { Paginated, paginate } from '../../common/types/paginated.type';
+import {
+  CourierThroughput,
+  DailyCount,
+  DashboardTrends,
+  RevenueSummary,
+  StatusTiming,
+} from '../../dashboard/types/dashboard.types';
 import { firstName } from '../../common/utils/name.util';
 import { User } from '../../user/entities/user.entity';
 import { RagService } from '../../rag/services/rag.service';
@@ -31,6 +38,8 @@ import { ParcelStatusLog } from '../entities/parcel-status-log.entity';
 import { Parcel } from '../entities/parcel.entity';
 import { calculateDeliveryFee, ratesFromEnv } from '../utils/pricing.util';
 import { toPublicParcel } from '../utils/public-parcel.util';
+import { AuditService } from '../../audit/services/audit.service';
+import { AuditAction, AuditTargetType } from '../../audit/types/audit.types';
 import { PasswordResetService } from '../../auth/services/password-reset.service';
 import { ParcelNotificationService } from './parcel-notification.service';
 import { sanitizeParcel, sanitizeParcels } from '../utils/sanitize-parcel.util';
@@ -96,6 +105,7 @@ export class ParcelService {
     private readonly notifications: ParcelNotificationService,
     private readonly config: ConfigService,
     private readonly passwordResetService: PasswordResetService,
+    private readonly auditService: AuditService,
   ) {}
 
   async create(sender: User, payload: CreateParcelDto): Promise<Parcel> {
@@ -176,9 +186,18 @@ export class ParcelService {
 
     this.assertTransitionAllowed(parcel.status, payload.status);
 
+    const from = parcel.status;
     parcel.status = payload.status;
     await this.parcelRepository.save(parcel);
     await this.addStatusLog(parcel, payload.status, actor, payload.note);
+    await this.auditService.record({
+      actor,
+      action: AuditAction.PARCEL_STATUS_CHANGED,
+      targetType: AuditTargetType.PARCEL,
+      targetId: parcel.trackingId,
+      summary: `${from} → ${payload.status}`,
+      metadata: { from, to: payload.status, note: payload.note ?? null },
+    });
 
     return this.refreshAndIndex(trackingId);
   }
@@ -216,6 +235,15 @@ export class ParcelService {
       // First name only: these notes surface on the public tracking page.
       `Assigned to ${firstName(courier.name)}`,
     );
+    await this.auditService.record({
+      actor: admin,
+      action: AuditAction.PARCEL_ASSIGNED,
+      targetType: AuditTargetType.PARCEL,
+      targetId: parcel.trackingId,
+      // The audit trail is internal, so it keeps the full name.
+      summary: `Assigned to ${courier.name} (${courier.email})`,
+      metadata: { courierId: courier.id, courierEmail: courier.email },
+    });
 
     return this.refreshAndIndex(trackingId);
   }
@@ -231,7 +259,8 @@ export class ParcelService {
       throw new BadRequestException('Parcel has no delivery personnel');
     }
 
-    const previousName = firstName(parcel.deliveryPersonnel.name);
+    const previousCourier = parcel.deliveryPersonnel;
+    const previousName = firstName(previousCourier.name);
     parcel.deliveryPersonnel = null;
     await this.parcelRepository.save(parcel);
     await this.addStatusLog(
@@ -240,6 +269,14 @@ export class ParcelService {
       admin,
       `Unassigned from ${previousName}`,
     );
+    await this.auditService.record({
+      actor: admin,
+      action: AuditAction.PARCEL_UNASSIGNED,
+      targetType: AuditTargetType.PARCEL,
+      targetId: parcel.trackingId,
+      summary: `Unassigned from ${previousCourier.name} (${previousCourier.email})`,
+      metadata: { courierId: previousCourier.id },
+    });
 
     return this.refreshAndIndex(trackingId);
   }
@@ -322,6 +359,14 @@ export class ParcelService {
       admin,
       'Parcel blocked by admin',
     );
+    await this.auditService.record({
+      actor: admin,
+      action: AuditAction.PARCEL_BLOCKED,
+      targetType: AuditTargetType.PARCEL,
+      targetId: parcel.trackingId,
+      summary: `Blocked while ${parcel.status}`,
+      metadata: { status: parcel.status },
+    });
 
     return this.refreshAndIndex(trackingId);
   }
@@ -447,6 +492,162 @@ export class ParcelService {
     }
 
     return { totalParcels, blockedParcels, parcelsByStatus };
+  }
+
+  /**
+   * Trend aggregates for the admin dashboard.
+   *
+   * Every figure is computed in Postgres rather than by loading parcels and
+   * reducing in Node — the point of these numbers is that they stay cheap as
+   * the table grows.
+   */
+  async getTrends(days: number): Promise<DashboardTrends> {
+    const since = new Date(Date.now() - days * 86_400_000);
+
+    const [daily, statusTimings, courierThroughput, revenue, fulfilment] =
+      await Promise.all([
+        this.dailyCounts(since),
+        this.statusTimings(since),
+        this.courierThroughput(),
+        this.revenueSummary(),
+        this.averageFulfilmentHours(since),
+      ]);
+
+    return {
+      rangeDays: days,
+      daily,
+      statusTimings,
+      courierThroughput,
+      revenue,
+      averageFulfilmentHours: fulfilment,
+    };
+  }
+
+  /** One row per day in the window, zero-filled so charts have no gaps. */
+  private async dailyCounts(since: Date): Promise<DailyCount[]> {
+    const rows = await this.parcelRepository.query(
+      `SELECT to_char(d.day, 'YYYY-MM-DD')                        AS date,
+              COALESCE(c.created, 0)::int                          AS created,
+              COALESCE(v.delivered, 0)::int                        AS delivered
+         FROM generate_series($1::date, CURRENT_DATE, '1 day') AS d(day)
+         LEFT JOIN (
+           SELECT date_trunc('day', "createdAt")::date AS day, COUNT(*) AS created
+             FROM parcels WHERE "createdAt" >= $1 GROUP BY 1
+         ) c ON c.day = d.day
+         LEFT JOIN (
+           SELECT date_trunc('day', "deliveredAt")::date AS day, COUNT(*) AS delivered
+             FROM parcels WHERE "deliveredAt" >= $1 GROUP BY 1
+         ) v ON v.day = d.day
+        ORDER BY d.day`,
+      [since],
+    );
+
+    return rows as DailyCount[];
+  }
+
+  /**
+   * Mean time a parcel spends in each status, from consecutive status-log
+   * entries. A parcel currently sitting in a status has no next entry yet and
+   * is excluded, so this measures completed dwell time only.
+   */
+  private async statusTimings(since: Date): Promise<StatusTiming[]> {
+    const rows = await this.parcelRepository.query(
+      `WITH spans AS (
+         SELECT status,
+                LEAD("createdAt") OVER (
+                  PARTITION BY "parcelId" ORDER BY "createdAt"
+                ) - "createdAt" AS dwell
+           FROM parcel_status_logs
+          WHERE "createdAt" >= $1
+       )
+       SELECT status,
+              ROUND(AVG(EXTRACT(EPOCH FROM dwell) / 3600)::numeric, 2) AS "averageHours",
+              COUNT(*)::int AS "sampleSize"
+         FROM spans
+        WHERE dwell IS NOT NULL
+        GROUP BY status
+        ORDER BY status`,
+      [since],
+    );
+
+    return rows.map(
+      (r: {
+        status: string;
+        averageHours: string | null;
+        sampleSize: number;
+      }) => ({
+        status: r.status,
+        averageHours: r.averageHours === null ? null : Number(r.averageHours),
+        sampleSize: r.sampleSize,
+      }),
+    );
+  }
+
+  private async courierThroughput(): Promise<CourierThroughput[]> {
+    const rows = await this.parcelRepository.query(
+      `SELECT u.id                                                   AS "courierId",
+              u.name                                                 AS "courierName",
+              COUNT(*) FILTER (WHERE p.status NOT IN ('DELIVERED','CANCELLED'))::int AS active,
+              COUNT(*) FILTER (WHERE p.status = 'DELIVERED')::int     AS delivered,
+              ROUND(AVG(
+                EXTRACT(EPOCH FROM (p."deliveredAt" - p."createdAt")) / 3600
+              ) FILTER (WHERE p."deliveredAt" IS NOT NULL)::numeric, 2)
+                                                                     AS "averageDeliveryHours"
+         FROM users u
+         JOIN parcels p ON p."deliveryPersonnelId" = u.id
+        GROUP BY u.id, u.name
+        ORDER BY delivered DESC, active DESC`,
+    );
+
+    return rows.map(
+      (r: {
+        courierId: string;
+        courierName: string;
+        active: number;
+        delivered: number;
+        averageDeliveryHours: string | null;
+      }) => ({
+        ...r,
+        averageDeliveryHours:
+          r.averageDeliveryHours === null
+            ? null
+            : Number(r.averageDeliveryHours),
+      }),
+    );
+  }
+
+  private async revenueSummary(): Promise<RevenueSummary> {
+    const [row] = await this.parcelRepository.query(
+      `SELECT COALESCE(SUM("deliveryFee") FILTER (WHERE status <> 'CANCELLED'), 0)   AS "deliveryFeesBooked",
+              COALESCE(SUM("deliveryFee") FILTER (WHERE status = 'DELIVERED'), 0)    AS "deliveryFeesDelivered",
+              COALESCE(SUM("codAmount") FILTER (
+                WHERE "isCodCollected" = false AND status NOT IN ('DELIVERED','CANCELLED')
+              ), 0)                                                                  AS "codOutstanding",
+              COALESCE(SUM("codAmount") FILTER (WHERE "isCodCollected" = true), 0)   AS "codCollected"
+         FROM parcels`,
+    );
+
+    return {
+      deliveryFeesBooked: Number(row.deliveryFeesBooked),
+      deliveryFeesDelivered: Number(row.deliveryFeesDelivered),
+      codOutstanding: Number(row.codOutstanding),
+      codCollected: Number(row.codCollected),
+    };
+  }
+
+  private async averageFulfilmentHours(since: Date): Promise<number | null> {
+    const [row] = await this.parcelRepository.query(
+      `SELECT ROUND(AVG(
+                EXTRACT(EPOCH FROM ("deliveredAt" - "createdAt")) / 3600
+              )::numeric, 2) AS hours
+         FROM parcels
+        WHERE "deliveredAt" IS NOT NULL AND "deliveredAt" >= $1`,
+      [since],
+    );
+
+    return row?.hours === null || row?.hours === undefined
+      ? null
+      : Number(row.hours);
   }
 
   // ─── Internals ────────────────────────────────────────────────────────────

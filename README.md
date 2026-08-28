@@ -1,4 +1,46 @@
-## 🗂️ Project Structure
+# Parcel Delivery API
+
+NestJS + PostgreSQL backend for a parcel courier service: senders book parcels,
+admins assign couriers, couriers move them through a status machine, receivers
+track them. Plus a RAG assistant that answers questions over uploaded policy
+PDFs and live parcel state.
+
+**Full endpoint reference with request/response shapes:
+[`API_ENDPOINTS.md`](./API_ENDPOINTS.md).** Interactive docs at `/api/docs`.
+
+---
+
+## 🚀 Getting started
+
+```bash
+npm install
+cp example.env .env        # then fill in the values
+npm run migration:run
+npm run start:dev
+```
+
+The API listens on `http://localhost:${PORT}/api`, Swagger UI on `/api/docs`.
+
+### Seeding dummy data
+
+40 users and 200 parcels spread over the last 90 days, so lists paginate and the
+dashboard trends have a real curve to draw:
+
+```bash
+SEED_DUMMY_DATA=true npm run migration:run
+```
+
+The seed migration is **inert without that flag** — migrations run on every
+deploy, so the opt-in is deliberate. Every seed account uses the password
+`SeedPass123!` with emails like `sender1@seed.local`, `admin1@seed.local`,
+`deliverypersonnel1@seed.local`. Parcels are prefixed `TRK-SEED-`.
+
+To remove it again: `npm run migration:revert`. The `down()` deletes only rows
+carrying those markers, so it will not touch your real data.
+
+---
+
+## 🗂️ Project structure
 
 Each feature is a self-contained module folder. Inside it, code is split by role
 so a file's job is obvious from its path:
@@ -7,18 +49,20 @@ so a file's job is obvious from its path:
 src/
 ├── config/                     # Shared configuration builders
 │   ├── database.config.ts      # One DataSourceOptions factory, used by Nest and the CLI
+│   ├── swagger.config.ts       # OpenAPI document + /api/docs mount
 │   └── load-env.ts             # .env loading for processes that boot outside Nest
 ├── database/
 │   ├── data-source.ts          # DataSource the TypeORM CLI points at
-│   ├── database.module.ts      # TypeOrmModule.forRootAsync wiring
-│   └── migrations/             # Versioned schema changes
+│   ├── migrations/             # Versioned schema changes
+│   └── seeds/                  # Dummy-data generation (pure, unit tested)
 ├── common/                     # Cross-cutting building blocks
 │   ├── access-control.module.ts
 │   ├── decorators/             # @Roles, @CurrentUser
+│   ├── dto/                    # PaginationQueryDto and friends
 │   ├── guards/                 # JwtAuthGuard, RolesGuard
-│   ├── types/
-│   └── utils/
-├── <feature>/                  # user, auth, token, parcel, dashboard, rag, keep-alive
+│   ├── constants/  types/  utils/
+├── mail/                       # SMTP transport + email templates
+├── <feature>/                  # user, auth, token, parcel, dashboard, audit, rag, keep-alive
 │   ├── controllers/            # HTTP layer only — no business logic
 │   ├── services/               # Business logic; the only place repositories live
 │   ├── entities/               # TypeORM entities owned by this module
@@ -34,31 +78,54 @@ src/
 **Entities are reached through services, never across modules.** Only the module
 that owns a table calls `TypeOrmModule.forFeature` for it:
 
-| Module   | Owns                              |
-|----------|-----------------------------------|
-| `user`   | `users`, `auth_providers`         |
-| `parcel` | `parcels`, `parcel_status_logs`   |
+| Module   | Owns                                                        |
+|----------|-------------------------------------------------------------|
+| `user`   | `users`, `auth_providers`                                    |
+| `parcel` | `parcels`, `parcel_status_logs`                              |
+| `auth`   | `refresh_tokens`, `password_resets`, `email_verifications`   |
+| `audit`  | `audit_logs`                                                 |
 
-Everything else asks the owning service. `ParcelService` resolves a receiver via
-`UserService.findOrCreateReceiver()`; `DashboardService` injects no repository at
-all and composes `UserService.getStats()` with `ParcelService.getStats()`.
+Everything else asks the owning service. `DashboardService` injects no
+repository at all and composes `UserService.getStats()` with
+`ParcelService.getStats()`.
 
-**No circular module imports, no `forwardRef`.** JWT signing lives in a
-dependency-free `TokenModule`, so `UserModule` and `AuthModule` both depend on it
-instead of on each other:
+**No circular module imports, no `forwardRef`.** Two splits exist purely to keep
+it that way, and both are worth knowing about before you add an import:
+
+- `AccountTokensModule` — the password-reset and email-verification services
+  without `AuthModule`'s controller. `AuthModule → AccessControlModule →
+  UserModule`, so `UserModule` importing `AuthModule` would be a cycle.
+- `AuditRecorderModule` — `AuditService` without `AuditModule`'s controller,
+  for the same reason.
 
 ```
 TokenModule ─┬─> UserModule ─> AccessControlModule ─┬─> AuthModule
              └────────────────────────────────────  ├─> ParcelModule ─> DashboardModule
-                                                    └─> ...
+                                                    ├─> AuditModule
+                                                    └─> RagModule
 ```
-
-`AccessControlModule` bundles the guards with the providers they inject, so a
-feature module gets `@UseGuards(JwtAuthGuard, RolesGuard)` by importing one thing.
 
 ---
 
-## 🧱 Database Migrations
+## 🔐 Auth model
+
+Five roles: `ADMIN`, `SENDER`, `RECEIVER`, `DELIVERY_PERSONNEL`, and
+`PENDING_DELIVERY` — the holding state a courier signup sits in until an admin
+approves it.
+
+Access tokens last 15 minutes and are stateless. Refresh tokens last 7 days,
+are stored as SHA-256 hashes in `refresh_tokens`, and **rotate**: calling
+`/api/auth/refresh-token` revokes the token you sent and issues a new pair.
+Logout revokes one session or all of them; changing or resetting a password ends
+every session.
+
+New accounts start with `isVerified: false` and are emailed a confirmation link.
+No route requires a verified address yet — that is a one-line guard when you
+want it.
+
+---
+
+## 🧱 Database migrations
 
 `synchronize` is **off**. The schema is owned by the files in
 `src/database/migrations/` and applied explicitly.
@@ -75,169 +142,111 @@ To add a change, edit the entity, then let TypeORM diff it against the database:
 npm run migration:generate -- src/database/migrations/AddParcelWeight
 ```
 
-For a migration you want to hand-write, use `npm run migration:create -- src/database/migrations/Name`.
+For a hand-written one, `npm run migration:create -- src/database/migrations/Name`.
 
-**Existing databases:** the baseline migration is written with `CREATE TABLE IF
-NOT EXISTS`, so running it against a database that `synchronize` already built is
-a no-op that just records the baseline. (`npm run migration:run -- --fake` is the
-alternative if you would rather not touch it at all.)
-
-Connection settings come from `DATABASE_URL`, or the discrete `DB_*` variables —
-see `example.env`. Set `DB_SSL=false` for a local Postgres without TLS. Migrations
-are **not** run on boot by default; set `DB_MIGRATIONS_RUN=true` if you want that.
+**Connection pooling.** Supabase's session pooler (port `5432`) allows **15
+clients in total** while node-postgres defaults to 10 per instance — a dev
+server plus one script exhausts it, and on Vercel every warm lambda holds its
+own pool. `DB_POOL_MAX` (default 5) caps it. If you hit `EMAXCONNSESSION`
+regularly, move to the transaction-mode pooler on port `6543`.
 
 ---
 
-## 🖥️ Frontend (Next.js)
+## ✉️ Email
 
-The SwiftParcel UI lives in [`percel-client/`](./percel-client/) — landing page + dashboard from `design-reference/swiftparcel.html`.
+`MailService` is plain SMTP via nodemailer. **Configuration is optional** —
+without `SMTP_HOST` it logs what it would have sent instead of throwing, so the
+password-reset flow is exercisable without credentials.
+
+Every send is fire-and-forget: a delivery failure is logged and never fails the
+write that triggered it. That is not tidiness — if `forgot-password` threw on a
+mail error it would return `500` for registered addresses and `200` for unknown
+ones, which is exactly the account-enumeration signal the generic response
+exists to hide.
+
+Sent on: account creation (confirm your email), a parcel booked for an
+unregistered receiver (claim your account), parcel reaching `PICKED_UP` /
+`OUT_FOR_DELIVERY` / `DELIVERED` / `CANCELLED`, and password reset.
+
+> Gmail app passwords are displayed in spaced groups of four and rejected unless
+> the spaces are stripped — `MailService` strips them, so paste as shown. Gmail
+> caps around 500 recipients/day; for production use a transactional provider
+> (Resend, Brevo, Postmark). They all speak SMTP, so it is an env change only.
+
+---
+
+## 💰 Pricing
+
+`deliveryFee` is computed server-side from `weightKg` and `codAmount` — the
+client sends a weight, never a price. Defaults: 60 base covering the first
+kilogram, 25 per additional kilogram rounded up, plus 1% of any cash-on-delivery
+amount, with a 60 minimum. Every rate is env-tunable (`PRICING_*`).
+
+Money columns are `numeric(10,2)`, not floating point.
+
+---
+
+## 🤖 RAG
+
+Q&A over uploaded PDFs and live parcel state, using Pinecone for vectors,
+HuggingFace for embeddings and Groq for completions.
+
+Parcels are re-indexed automatically on create, status change, cancellation,
+delivery confirmation, assignment and block — `ParcelService` calls
+`RagService.indexParcel()` directly.
+
+`POST /api/rag/ask` returns a complete answer; `POST /api/rag/ask/stream`
+returns the same thing as server-sent events, sources first, then tokens.
+
+Index-mutating routes are admin-only. `ask` requires any signed-in user, because
+each call bills an embedding and a completion.
+
+> Groq retires models with little notice — it dropped `llama-3.1-8b-instant`
+> mid-project. Set `GROQ_MODEL` to change it without touching code; check
+> <https://console.groq.com/docs/models> when answers start failing with
+> `model_not_found`.
+
+---
+
+## 🧪 Tests
+
+```bash
+npm test              # unit tests
+npm run test:api      # e2e against in-memory SQLite (no live database)
+```
+
+---
+
+## ☁️ Deployment
+
+Vercel, configured by `vercel.json`, which builds `src/main.ts` with
+`@vercel/node`. Two consequences worth knowing:
+
+- **`nest build` does not run there**, so the Swagger CLI plugin never applies.
+  Schemas come from explicit `@ApiProperty()` decorators, which work in both
+  paths. Do not switch to the plugin.
+- **WebSockets cannot work on serverless functions.** For realtime, use Supabase
+  Realtime (the client connects directly) or move the API to a host with
+  persistent processes.
+
+A daily cron hits `/api/keep-alive` so Supabase does not pause the project. It
+authenticates with `CRON_SECRET`, not a user JWT.
+
+---
+
+## 🖥️ Frontend
+
+The Next.js client lives in [`percel-client/`](./percel-client/).
 
 ```bash
 cd percel-client && npm install && npm run dev
 ```
 
-Set the API URL in `percel-client/.env.local`:
-
 ```env
 NEXT_PUBLIC_API_BASE_URL=http://localhost:3000/api
 ```
 
-Change this after deployment (e.g. `https://api.yourdomain.com/api`). Client runs on **http://localhost:3001**, API on **http://localhost:3000**.
-
----
-
-## 🧪 Automated API Tests
-
-E2E tests cover every endpoint below using an in-memory SQLite database (no live Supabase required).
-
-```bash
-npm run test:api
-```
-
-Also available: `npm run test:e2e` (same suite).
-
----
-
-## 📘 API Endpoints Summary
-
-### 🔐 Auth Routes
-
-| Method | Endpoint             | Access      | Description                      |
-|--------|----------------------|-------------|----------------------------------|
-| POST   | `/api/auth/login`    | Public      | Login with credentials           |
-| POST   | `/api/auth/refresh-token` | Public | Get a new access token using refresh token |
-| POST   | `/api/auth/logout`   | Authenticated | Logout and clear refresh token |
-| POST   | `/api/auth/change-password` | Authenticated (All Roles) | Change current password |
-
----
-
-### 👤 User Routes
-
-| Method | Endpoint                 | Access         | Description                     |
-|--------|--------------------------|----------------|---------------------------------|
-| POST   | `/api/users/register`    | Public         | Create a new user (Sender)      |
-| PATCH  | `/api/users/update-profile` | Authenticated (All Roles) | Update own profile          |
-| GET    | `/api/users/me`          | Authenticated (All Roles) | Get own user details       |
-| GET    | `/api/users/all-users`   | Admin          | Get all users                    |
-| GET    | `/api/users/:id`         | Admin          | Get single user by ID           |
-| PATCH  | `/api/users/:userId/block` | Admin        | Block a user                     |
-| PATCH  | `/api/users/:userId/unblock` | Admin      | Unblock a user                   |
-
----
-
-### 📦 Parcel Routes
-
-| Method | Endpoint                            | Access        | Description                                   |
-|--------|-------------------------------------|---------------|-----------------------------------------------|
-| POST   | `/api/parcels/`                     | Sender, Admin | Create a new parcel                           |
-| PATCH  | `/api/parcels/:trackingId/status`   | Admin         | Update parcel status                          |
-| PATCH  | `/api/parcels/:trackingId/cancel`   | Sender        | Cancel a parcel                               |
-| PATCH  | `/api/parcels/:trackingId/confirm`  | Receiver      | Confirm parcel delivery                       |
-| PATCH  | `/api/parcels/:trackingId/block`    | Admin         | Block a parcel                                |
-| GET    | `/api/parcels/my-parcels`           | Sender        | View own parcels and status logs              |
-| GET    | `/api/parcels/incoming-parcels`     | Receiver      | View incoming parcels                          |
-| GET    | `/api/parcels/delivery-history`     | Receiver      | View delivery history                          |
-| GET    | `/api/parcels/`                     | Admin         | Get all parcels                                |
-| GET    | `/api/parcels/:trackingId`          | Public        | Get single parcel by tracking ID              |
-
----
-### 📦 Dashboard Routes
-
-| Method | Endpoint                            | Access        | Description                                   |
-|--------|-------------------------------------|---------------|-----------------------------------------------|
-| GET   | `/api/dashboard/`                     | Admin | Get Dashboard Stats                           |
-
----
-
-## 🤖 RAG (Retrieval-Augmented Generation)
-
-This project now includes a RAG module for:
-
-- Q&A over uploaded PDF knowledge docs (policy/help content)
-- Q&A over live parcel tracking context
-- Hybrid retrieval using both sources
-
-### ✅ Automatic Parcel Indexing
-
-Parcel records are automatically indexed into the vector store whenever parcel state changes in DB flows:
-
-- Parcel created
-- Parcel status updated
-- Parcel cancelled
-- Parcel delivery confirmed
-- Parcel blocked
-
-This makes queries like "Where is my parcel TRK-1042?" answerable via `/api/rag/ask`.
-
-### 🔧 RAG Environment Variables
-
-Make sure these are configured:
-
-```env
-PINECONE_API_KEY=...
-PINECONE_INDEX=...
-HUGGINGFACE_API_KEY=...
-GROQ_API_KEY=...
-
-# Used by internal parcel->RAG indexing call (optional fallbacks are APP_URL then localhost)
-INTERNAL_API_BASE_URL=http://localhost:5000
-```
-
-### 📚 RAG Routes
-
-| Method | Endpoint                         | Description |
-|--------|----------------------------------|-------------|
-| POST   | `/api/rag/pdf/upload`            | Upload + ingest PDF into vector store |
-| DELETE | `/api/rag/pdf/:source`           | Remove a PDF from vector store |
-| POST   | `/api/rag/ask`                   | Ask a question over retrieved context |
-| POST   | `/api/rag/index/parcel`          | Index one parcel document |
-| POST   | `/api/rag/index/bulk`            | Index many parcels |
-| DELETE | `/api/rag/index/parcel/:id`      | Remove one indexed parcel |
-
-### 💬 Ask Examples
-
-Ask a tracking question (recommended filter):
-
-```http
-POST /api/rag/ask
-Content-Type: application/json
-
-{
-	"question": "Where is my parcel TRK-1042?",
-	"filter": "parcel"
-}
-```
-
-Ask a policy/doc question:
-
-```http
-POST /api/rag/ask
-Content-Type: application/json
-
-{
-	"question": "What is the refund policy for lost parcels?",
-	"filter": "pdf"
-}
-```
-
-Use `"filter": "all"` to search both parcel and PDF context.
+Client runs on **http://localhost:3001**, API on **http://localhost:3000**.
+Set `FRONTEND_URL` on the API so emailed reset and confirmation links point at
+the client — it needs routes at `/reset-password` and `/verify-email` that read
+`?token=`.

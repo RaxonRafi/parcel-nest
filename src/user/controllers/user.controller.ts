@@ -146,8 +146,11 @@ export class UserController {
   @UseGuards(JwtAuthGuard, RolesGuard)
   @Roles(Role.ADMIN)
   @Patch(':userId/block')
-  async blockUser(@Param('userId') userId: string): Promise<SafeUser> {
-    return this.userService.setUserActiveStatus(userId, false);
+  async blockUser(
+    @Param('userId') userId: string,
+    @CurrentUser() actor: User,
+  ): Promise<SafeUser> {
+    return this.userService.setUserActiveStatus(userId, false, actor);
   }
 
   @ApiBearerAuth(JWT_AUTH)
@@ -157,8 +160,11 @@ export class UserController {
   @UseGuards(JwtAuthGuard, RolesGuard)
   @Roles(Role.ADMIN)
   @Patch(':userId/unblock')
-  async unblockUser(@Param('userId') userId: string): Promise<SafeUser> {
-    return this.userService.setUserActiveStatus(userId, true);
+  async unblockUser(
+    @Param('userId') userId: string,
+    @CurrentUser() actor: User,
+  ): Promise<SafeUser> {
+    return this.userService.setUserActiveStatus(userId, true, actor);
   }
 
   @ApiBearerAuth(JWT_AUTH)
@@ -175,8 +181,9 @@ export class UserController {
   @Patch(':userId/delivery/approve')
   async approveDeliveryPersonnel(
     @Param('userId') userId: string,
+    @CurrentUser() actor: User,
   ): Promise<SafeUser> {
-    return this.userService.setDeliveryApproval(userId, true);
+    return this.userService.setDeliveryApproval(userId, true, actor);
   }
 
   @ApiBearerAuth(JWT_AUTH)
@@ -193,7 +200,8 @@ export class UserController {
   @Patch(':userId/delivery/reject')
   async rejectDeliveryPersonnel(
     @Param('userId') userId: string,
+    @CurrentUser() actor: User,
   ): Promise<SafeUser> {
-    return this.userService.setDeliveryApproval(userId, false);
+    return this.userService.setDeliveryApproval(userId, false, actor);
   }
 }

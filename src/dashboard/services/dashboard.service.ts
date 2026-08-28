@@ -1,7 +1,7 @@
 import { Injectable } from '@nestjs/common';
 import { ParcelService } from '../../parcel/services/parcel.service';
 import { UserService } from '../../user/services/user.service';
-import { DashboardStats } from '../types/dashboard.types';
+import { DashboardStats, DashboardTrends } from '../types/dashboard.types';
 
 /**
  * Pure composition layer — it owns no entity and reads everything through the
@@ -21,5 +21,10 @@ export class DashboardService {
     ]);
 
     return { ...userStats, ...parcelStats };
+  }
+
+  /** Everything the counts cannot tell you: direction, timing, throughput. */
+  async getTrends(days: number): Promise<DashboardTrends> {
+    return this.parcelService.getTrends(days);
   }
 }

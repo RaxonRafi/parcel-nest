@@ -1,3 +1,4 @@
+import { AuditService } from '../../audit/services/audit.service';
 import { Test, TestingModule } from '@nestjs/testing';
 import { ConfigService } from '@nestjs/config';
 import { getRepositoryToken } from '@nestjs/typeorm';
@@ -21,6 +22,7 @@ describe('UserService', () => {
         },
         { provide: TokenService, useValue: {} },
         { provide: EmailVerificationService, useValue: { issue: jest.fn() } },
+        { provide: AuditService, useValue: { record: jest.fn() } },
       ],
     }).compile();
 

@@ -1,0 +1,16 @@
+/** What happened. Values are persisted, so treat them as an append-only list. */
+export enum AuditAction {
+  USER_BLOCKED = 'USER_BLOCKED',
+  USER_UNBLOCKED = 'USER_UNBLOCKED',
+  DELIVERY_APPROVED = 'DELIVERY_APPROVED',
+  DELIVERY_REJECTED = 'DELIVERY_REJECTED',
+  PARCEL_BLOCKED = 'PARCEL_BLOCKED',
+  PARCEL_ASSIGNED = 'PARCEL_ASSIGNED',
+  PARCEL_UNASSIGNED = 'PARCEL_UNASSIGNED',
+  PARCEL_STATUS_CHANGED = 'PARCEL_STATUS_CHANGED',
+}
+
+export enum AuditTargetType {
+  USER = 'USER',
+  PARCEL = 'PARCEL',
+}

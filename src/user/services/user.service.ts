@@ -11,6 +11,8 @@ import { InjectRepository } from '@nestjs/typeorm';
 import * as bcrypt from 'bcryptjs';
 import { ILike, Repository } from 'typeorm';
 import { Paginated, paginate } from '../../common/types/paginated.type';
+import { AuditService } from '../../audit/services/audit.service';
+import { AuditAction, AuditTargetType } from '../../audit/types/audit.types';
 import { EmailVerificationService } from '../../auth/services/email-verification.service';
 import { PaginationQueryDto } from '../../common/dto/pagination-query.dto';
 import { QueryUsersDto } from '../dto/query-users.dto';
@@ -44,6 +46,7 @@ export class UserService {
     private readonly configService: ConfigService,
     private readonly tokenService: TokenService,
     private readonly emailVerificationService: EmailVerificationService,
+    private readonly auditService: AuditService,
   ) {}
 
   // ─── Bootstrapping ────────────────────────────────────────────────────────
@@ -310,10 +313,25 @@ export class UserService {
   async setUserActiveStatus(
     userId: string,
     active: boolean,
+    actor?: User,
   ): Promise<SafeUser> {
     const user = await this.findEntityByIdOrFail(userId);
+    const from = user.isActive;
     user.isActive = active ? IsActive.ACTIVE : IsActive.BLOCKED;
-    return sanitizeUser(await this.userRepository.save(user));
+    const saved = await this.userRepository.save(user);
+
+    if (actor) {
+      await this.auditService.record({
+        actor,
+        action: active ? AuditAction.USER_UNBLOCKED : AuditAction.USER_BLOCKED,
+        targetType: AuditTargetType.USER,
+        targetId: user.id,
+        summary: `${active ? 'Unblocked' : 'Blocked'} ${user.email}`,
+        metadata: { from, to: saved.isActive },
+      });
+    }
+
+    return sanitizeUser(saved);
   }
 
   /**
@@ -330,6 +348,7 @@ export class UserService {
   async setDeliveryApproval(
     userId: string,
     approved: boolean,
+    actor?: User,
   ): Promise<SafeUser> {
     const user = await this.findEntityByIdOrFail(userId);
 
@@ -339,8 +358,24 @@ export class UserService {
       );
     }
 
+    const from = user.role;
     user.role = approved ? Role.DELIVERY_PERSONNEL : Role.SENDER;
-    return sanitizeUser(await this.userRepository.save(user));
+    const saved = await this.userRepository.save(user);
+
+    if (actor) {
+      await this.auditService.record({
+        actor,
+        action: approved
+          ? AuditAction.DELIVERY_APPROVED
+          : AuditAction.DELIVERY_REJECTED,
+        targetType: AuditTargetType.USER,
+        targetId: user.id,
+        summary: `${approved ? 'Approved' : 'Rejected'} courier application for ${user.email}`,
+        metadata: { from, to: saved.role },
+      });
+    }
+
+    return sanitizeUser(saved);
   }
 
   async updateUser(

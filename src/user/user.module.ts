@@ -2,6 +2,7 @@ import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { JwtAuthGuard } from '../common/guards/jwt-auth.guard';
 import { RolesGuard } from '../common/guards/roles.guard';
+import { AuditRecorderModule } from '../audit/audit-recorder.module';
 import { AccountTokensModule } from '../auth/account-tokens.module';
 import { TokenModule } from '../token/token.module';
 import { UserController } from './controllers/user.controller';
@@ -18,6 +19,7 @@ import { UserService } from './services/user.service';
     TypeOrmModule.forFeature([User, AuthProvider]),
     TokenModule,
     AccountTokensModule,
+    AuditRecorderModule,
   ],
   controllers: [UserController],
   providers: [UserService, JwtAuthGuard, RolesGuard],

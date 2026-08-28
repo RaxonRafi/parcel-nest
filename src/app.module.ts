@@ -6,6 +6,7 @@ import { THROTTLER_CONFIG } from './common/throttler.config';
 import { AppController } from './app.controller';
 import { AppService } from './app.service';
 import { DatabaseModule } from './database/database.module';
+import { AuditModule } from './audit/audit.module';
 import { AuthModule } from './auth/auth.module';
 import { DashboardModule } from './dashboard/dashboard.module';
 import { KeepAliveModule } from './keep-alive/keep-alive.module';
@@ -26,6 +27,7 @@ import { UserModule } from './user/user.module';
     AuthModule,
     ParcelModule,
     DashboardModule,
+    AuditModule,
     RagModule,
     KeepAliveModule,
   ],

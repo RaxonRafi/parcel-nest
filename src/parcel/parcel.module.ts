@@ -1,5 +1,6 @@
 import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
+import { AuditRecorderModule } from '../audit/audit-recorder.module';
 import { AccountTokensModule } from '../auth/account-tokens.module';
 import { AccessControlModule } from '../common/access-control.module';
 import { RagModule } from '../rag/rag.module';
@@ -14,6 +15,7 @@ import { ParcelService } from './services/parcel.service';
     TypeOrmModule.forFeature([Parcel, ParcelStatusLog]),
     AccessControlModule,
     AccountTokensModule,
+    AuditRecorderModule,
     // Parcel writes re-index through RagService directly; RagModule does not
     // depend on ParcelModule, so this import introduces no cycle.
     RagModule,

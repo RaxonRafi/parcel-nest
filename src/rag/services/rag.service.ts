@@ -20,6 +20,8 @@ import {
   PdfMetadata,
   RagAnswer,
   RagFilter,
+  RagSource,
+  RagStreamChunk,
 } from '../types/rag.types';
 
 /** Overridable with the GROQ_MODEL env var. */
@@ -150,24 +152,54 @@ export class RagService implements OnModuleInit {
 
   // ─── Ask ──────────────────────────────────────────────────────────────────
 
+  /**
+   * Streams the answer token by token.
+   *
+   * Sources resolve first and are yielded as a single leading chunk, so a
+   * client can render attribution before the prose finishes. Retrieval runs
+   * once and is shared with the chain rather than being issued twice.
+   */
+  async *askStream(
+    question: string,
+    filter?: RagFilter,
+  ): AsyncGenerator<RagStreamChunk> {
+    const retriever = this.buildRetriever(filter);
+    const sourceDocs = await retriever.invoke(question);
+
+    yield {
+      type: 'sources',
+      sources: sourceDocs.map((d) => this.toSource(d)),
+    };
+
+    const chain = RunnableSequence.from([
+      {
+        context: () => sourceDocs.map((d) => d.pageContent).join('\n\n'),
+        question: new RunnablePassthrough(),
+      },
+      this.answerPrompt(),
+      this.llm,
+      new StringOutputParser(),
+    ]);
+
+    try {
+      for await (const token of await chain.stream(question)) {
+        if (token) {
+          yield { type: 'token', token };
+        }
+      }
+      yield { type: 'done' };
+    } catch (error) {
+      // Surfaced as a stream event rather than thrown: the response headers
+      // and some body have already gone out, so an exception filter cannot
+      // turn this into a clean HTTP error any more.
+      const message = error instanceof Error ? error.message : 'Unknown error';
+      this.logger.error(`RAG stream failed: ${message}`);
+      yield { type: 'error', message: 'The answer could not be completed' };
+    }
+  }
+
   async ask(question: string, filter?: RagFilter): Promise<RagAnswer> {
-    const retriever =
-      filter && filter !== 'all'
-        ? this.vectorStore.asRetriever({
-            k: 5,
-            filter: { type: { $eq: filter } },
-          })
-        : this.vectorStore.asRetriever({ k: 5 });
-
-    const prompt = ChatPromptTemplate.fromTemplate(`
-      You are a helpful parcel delivery assistant.
-      Answer the question based only on the context below.
-      If you don't know, say "I don't have that information."
-
-      Context: {context}
-
-      Question: {question}
-    `);
+    const retriever = this.buildRetriever(filter);
 
     const formatDocs = (docs: Document[]) =>
       docs.map((d) => d.pageContent).join('\n\n');
@@ -177,7 +209,7 @@ export class RagService implements OnModuleInit {
         context: retriever.pipe(formatDocs),
         question: new RunnablePassthrough(),
       },
-      prompt,
+      this.answerPrompt(),
       this.llm,
       new StringOutputParser(),
     ]);
@@ -187,13 +219,36 @@ export class RagService implements OnModuleInit {
       retriever.invoke(question),
     ]);
 
+    return { answer, sources: sourceDocs.map((d) => this.toSource(d)) };
+  }
+
+  /** Shared by `ask` and `askStream` so the two cannot retrieve differently. */
+  private buildRetriever(filter?: RagFilter) {
+    return filter && filter !== 'all'
+      ? this.vectorStore.asRetriever({
+          k: 5,
+          filter: { type: { $eq: filter } },
+        })
+      : this.vectorStore.asRetriever({ k: 5 });
+  }
+
+  private answerPrompt(): ChatPromptTemplate {
+    return ChatPromptTemplate.fromTemplate(`
+      You are a helpful parcel delivery assistant.
+      Answer the question based only on the context below.
+      If you don't know, say "I don't have that information."
+
+      Context: {context}
+
+      Question: {question}
+    `);
+  }
+
+  private toSource(doc: Document): RagSource {
     return {
-      answer,
-      sources: sourceDocs.map((d) => ({
-        type: d.metadata.type,
-        source: d.metadata.source ?? d.metadata.tracking_code,
-        page: d.metadata.loc?.pageNumber ?? null,
-      })),
+      type: doc.metadata.type,
+      source: doc.metadata.source ?? doc.metadata.tracking_code,
+      page: doc.metadata.loc?.pageNumber ?? null,
     };
   }
 }

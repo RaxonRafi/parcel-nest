@@ -5,10 +5,12 @@ import {
   Delete,
   Param,
   Post,
+  Res,
   UploadedFile,
   UseGuards,
   UseInterceptors,
 } from '@nestjs/common';
+import type { Response } from 'express';
 import { FileInterceptor } from '@nestjs/platform-express';
 import {
   ApiBearerAuth,
@@ -136,6 +138,45 @@ export class RagController {
   @ApiResponse({ status: 400, description: 'Question is required' })
   @ApiBearerAuth(JWT_AUTH)
   @UseGuards(JwtAuthGuard)
+  @ApiBearerAuth(JWT_AUTH)
+  @ApiOperation({
+    summary: 'Ask a question, streamed',
+    description:
+      'Server-sent events. Emits one `sources` event, then a run of `token` events, then exactly one `done` or `error`. Same auth and cost as `ask`.',
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'text/event-stream of RagStreamChunk JSON payloads',
+  })
+  @Throttle({ ai: { limit: 20, ttl: 60_000 } })
+  @UseGuards(JwtAuthGuard)
+  @Post('ask/stream')
+  async askStream(@Body() body: AskDto, @Res() res: Response): Promise<void> {
+    res.setHeader('Content-Type', 'text/event-stream');
+    res.setHeader('Cache-Control', 'no-cache, no-transform');
+    res.setHeader('Connection', 'keep-alive');
+    // Without this, a proxy that buffers responses defeats the whole point.
+    res.setHeader('X-Accel-Buffering', 'no');
+    res.flushHeaders?.();
+
+    let clientGone = false;
+    res.on('close', () => {
+      clientGone = true;
+    });
+
+    for await (const chunk of this.ragService.askStream(
+      body.question,
+      body.filter ?? 'all',
+    )) {
+      // Stop pulling tokens from the model the moment nobody is listening —
+      // every one of them costs money.
+      if (clientGone) break;
+      res.write(`data: ${JSON.stringify(chunk)}\n\n`);
+    }
+
+    res.end();
+  }
+
   @Throttle({ ai: { limit: 20, ttl: 60_000 } })
   @Post('ask')
   ask(@Body() body: AskDto): Promise<RagAnswer> {

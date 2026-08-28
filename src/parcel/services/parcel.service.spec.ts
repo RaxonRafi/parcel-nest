@@ -1,3 +1,4 @@
+import { AuditService } from '../../audit/services/audit.service';
 import { Test, TestingModule } from '@nestjs/testing';
 import { BadRequestException, ForbiddenException } from '@nestjs/common';
 import { getRepositoryToken } from '@nestjs/typeorm';
@@ -71,6 +72,7 @@ describe('ParcelService — delivery personnel', () => {
         },
         { provide: ConfigService, useValue: { get: jest.fn() } },
         { provide: PasswordResetService, useValue: { issueClaim: jest.fn() } },
+        { provide: AuditService, useValue: { record: jest.fn() } },
       ],
     }).compile();
 

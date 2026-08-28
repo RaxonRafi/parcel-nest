@@ -1,5 +1,6 @@
 import { join } from 'path';
 import { DataSourceOptions } from 'typeorm';
+import { AuditLog } from '../audit/entities/audit-log.entity';
 import { EmailVerification } from '../auth/entities/email-verification.entity';
 import { PasswordReset } from '../auth/entities/password-reset.entity';
 import { RefreshToken } from '../auth/entities/refresh-token.entity';
@@ -21,6 +22,7 @@ export const ENTITIES = [
   RefreshToken,
   PasswordReset,
   EmailVerification,
+  AuditLog,
 ];
 
 export const MIGRATIONS_DIR = join(__dirname, '..', 'database', 'migrations');
