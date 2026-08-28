@@ -1,6 +1,6 @@
-import { ParcelStatus } from '../parcel.interface';
+import { ParcelStatus } from '../types/parcel.types';
 
 export class UpdateParcelStatusDto {
-  status: ParcelStatus;
+  status!: ParcelStatus;
   note?: string;
 }

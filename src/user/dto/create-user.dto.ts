@@ -1,4 +1,4 @@
-import { Role } from '../user.interface';
+import { Role } from '../types/user.types';
 
 export class CreateUserDto {
   name!: string;

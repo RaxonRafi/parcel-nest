@@ -1,19 +1,21 @@
-import { Module, forwardRef } from '@nestjs/common';
+import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
-import { AuthModule } from '../auth/auth.module';
-import { RolesGuard } from '../common/guards/roles.guard';
-import { User } from './user.entity';
-import { AuthProvider } from './auth-provider.entity';
-import { UserService } from './user.service';
-import { UserController } from './user.controller';
+import { JwtAuthGuard } from '../../common/guards/jwt-auth.guard';
+import { RolesGuard } from '../../common/guards/roles.guard';
+import { TokenModule } from '../token/token.module';
+import { UserController } from './controllers/user.controller';
+import { AuthProvider } from './entities/auth-provider.entity';
+import { User } from './entities/user.entity';
+import { UserService } from './services/user.service';
 
+/**
+ * Owns the user tables. The guards are declared locally rather than pulled in
+ * from `AccessControlModule`, because that module imports this one.
+ */
 @Module({
-  imports: [
-    TypeOrmModule.forFeature([User, AuthProvider]),
-    forwardRef(() => AuthModule),
-  ],
-  providers: [UserService, RolesGuard],
+  imports: [TypeOrmModule.forFeature([User, AuthProvider]), TokenModule],
   controllers: [UserController],
+  providers: [UserService, JwtAuthGuard, RolesGuard],
   exports: [UserService],
 })
 export class UserModule {}
