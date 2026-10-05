@@ -1,10 +1,29 @@
 import { INestApplication, ValidationPipe } from '@nestjs/common';
 import { NestFactory } from '@nestjs/core';
+import { IoAdapter } from '@nestjs/platform-socket.io';
+import { ServerOptions } from 'socket.io';
 import { AppModule } from './app.module';
 import { setupSwagger } from './config/swagger.config';
 import { UserService } from './user/services/user.service';
 
 let app: INestApplication | undefined;
+
+/** Applies the HTTP CORS allow-list to the Socket.IO handshake as well. */
+class CorsIoAdapter extends IoAdapter {
+  constructor(
+    host: INestApplication,
+    private readonly origins: string[],
+  ) {
+    super(host);
+  }
+
+  createIOServer(port: number, options?: ServerOptions) {
+    return super.createIOServer(port, {
+      ...options,
+      cors: { origin: this.origins, credentials: true },
+    }) as unknown;
+  }
+}
 
 async function bootstrap(): Promise<INestApplication> {
   if (app) return app;
@@ -28,18 +47,18 @@ async function bootstrap(): Promise<INestApplication> {
       transformOptions: { enableImplicitConversion: false },
     }),
   );
-  app.enableCors({
-    origin: process.env.CORS_ORIGIN?.split(',') ?? [
-      'http://localhost:3001',
-      'http://127.0.0.1:3001',
-      'https://percel-client-next.vercel.app',
-    ],
-    credentials: true,
-  });
+  const origins = process.env.CORS_ORIGIN?.split(',') ?? [
+    'http://localhost:3001',
+    'http://127.0.0.1:3001',
+    'https://percel-client-next.vercel.app',
+  ];
+  app.enableCors({ origin: origins, credentials: true });
+  app.useWebSocketAdapter(new CorsIoAdapter(app, origins));
   setupSwagger(app);
 
-  // ✅ Local: listen on port
-  if (process.env.NODE_ENV !== 'production') {
+  // ✅ Local and long-running hosts: listen on a port. WebSockets need this —
+  // a Vercel function cannot hold a connection open.
+  if (!process.env.VERCEL) {
     await app.listen(process.env.PORT ?? 3000);
     console.log(
       `🚀 Server running on http://localhost:${process.env.PORT ?? 3000}/api`,

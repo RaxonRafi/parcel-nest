@@ -152,6 +152,8 @@ export class ParcelService {
     const savedParcel = await this.parcelRepository.save(parcel);
     const freshParcel = await this.getParcelWithLogs(savedParcel.trackingId);
     await this.triggerParcelIndex(freshParcel);
+    // PENDING sends no email; this only reaches connected dashboards.
+    await this.notifications.notifyStatusChange(freshParcel);
 
     if (receiverIsNew) {
       // The account was created for them; they have no password yet.
