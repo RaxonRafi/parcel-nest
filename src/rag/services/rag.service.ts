@@ -24,6 +24,18 @@ import {
   RagStreamChunk,
 } from '../types/rag.types';
 
+/**
+ * Greetings, thanks and the like. Retrieval is similarity search, so even
+ * "hi" comes back with five unrelated parcels — skip it and let the model
+ * answer conversationally instead.
+ */
+const SMALL_TALK =
+  /^(hi+|hey+|hello+|yo|hola|salam|assalamu? ?alaikum|good (morning|afternoon|evening|night)|thanks?( you)?( so much| a lot)?|thank u|ty|ok(ay)?|cool|great|nice|bye|goodbye|see you|how are you|who are you|what can you do|help)( there| again)?[\s!.?,]*$/i;
+
+export function isSmallTalk(message: string): boolean {
+  return SMALL_TALK.test(message.trim());
+}
+
 /** Overridable with the GROQ_MODEL env var. */
 const DEFAULT_GROQ_MODEL = 'openai/gpt-oss-20b';
 
@@ -163,8 +175,7 @@ export class RagService implements OnModuleInit {
     question: string,
     filter?: RagFilter,
   ): AsyncGenerator<RagStreamChunk> {
-    const retriever = this.buildRetriever(filter);
-    const sourceDocs = await retriever.invoke(question);
+    const sourceDocs = await this.retrieve(question, filter);
 
     yield {
       type: 'sources',
@@ -199,14 +210,12 @@ export class RagService implements OnModuleInit {
   }
 
   async ask(question: string, filter?: RagFilter): Promise<RagAnswer> {
-    const retriever = this.buildRetriever(filter);
-
-    const formatDocs = (docs: Document[]) =>
-      docs.map((d) => d.pageContent).join('\n\n');
+    // Retrieved once and shared with the chain, as in `askStream`.
+    const sourceDocs = await this.retrieve(question, filter);
 
     const chain = RunnableSequence.from([
       {
-        context: retriever.pipe(formatDocs),
+        context: () => sourceDocs.map((d) => d.pageContent).join('\n\n'),
         question: new RunnablePassthrough(),
       },
       this.answerPrompt(),
@@ -214,12 +223,18 @@ export class RagService implements OnModuleInit {
       new StringOutputParser(),
     ]);
 
-    const [answer, sourceDocs] = await Promise.all([
-      chain.invoke(question),
-      retriever.invoke(question),
-    ]);
+    const answer = await chain.invoke(question);
 
     return { answer, sources: sourceDocs.map((d) => this.toSource(d)) };
+  }
+
+  /** Nothing is looked up for small talk, so it cites nothing either. */
+  private async retrieve(
+    question: string,
+    filter?: RagFilter,
+  ): Promise<Document[]> {
+    if (isSmallTalk(question)) return [];
+    return this.buildRetriever(filter).invoke(question);
   }
 
   /** Shared by `ask` and `askStream` so the two cannot retrieve differently. */
@@ -235,12 +250,18 @@ export class RagService implements OnModuleInit {
   private answerPrompt(): ChatPromptTemplate {
     return ChatPromptTemplate.fromTemplate(`
       You are a helpful parcel delivery assistant.
-      Answer the question based only on the context below.
-      If you don't know, say "I don't have that information."
+
+      If the message is a greeting, thanks, or small talk rather than a
+      question, reply in one short friendly sentence and offer to help with
+      tracking a parcel or delivery questions. Do not mention the context.
+
+      Otherwise, answer the question based only on the context below.
+      If the context does not contain the answer, say
+      "I don't have that information."
 
       Context: {context}
 
-      Question: {question}
+      Message: {question}
     `);
   }
 
