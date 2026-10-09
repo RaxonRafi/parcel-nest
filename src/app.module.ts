@@ -8,6 +8,7 @@ import { AppService } from './app.service';
 import { DatabaseModule } from './database/database.module';
 import { AuditModule } from './audit/audit.module';
 import { AuthModule } from './auth/auth.module';
+import { ContactModule } from './contact/contact.module';
 import { DashboardModule } from './dashboard/dashboard.module';
 import { KeepAliveModule } from './keep-alive/keep-alive.module';
 import { MailModule } from './mail/mail.module';
@@ -29,6 +30,7 @@ import { UserModule } from './user/user.module';
     DashboardModule,
     AuditModule,
     RagModule,
+    ContactModule,
     KeepAliveModule,
   ],
   controllers: [AppController],

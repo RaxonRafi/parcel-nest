@@ -382,6 +382,16 @@ already been sent by then. Closing the connection stops token generation.
 > Index-mutating routes are admin-only. `ask` needs any signed-in user rather
 > than being public, because each call bills an embedding and a completion.
 
+## Contact
+
+| Access | Method | Path | Returns |
+|---|---|---|---|
+| Public | `POST` | `/api/contact` | `{ message: string }` |
+
+Body: `{ name, email, topic, trackingId?, message }`, where `topic` is one of
+`sending`, `tracking`, `courier`, `other`. The message is emailed to
+`SUPPORT_EMAIL` and is not stored. Limited to 5 requests a minute.
+
 ## System
 
 | Role | Method | Endpoint | Response |
