@@ -51,21 +51,27 @@ describeLive('Dashboard trends against a real Postgres', () => {
   });
 
   /**
-   * Rows the chart is meant to show: from `since` up to the end of today.
-   * The upper bound matters — the series stops at CURRENT_DATE, so a row
-   * dated later is rightly absent from it, and counting it here would make a
-   * correct query look wrong.
+   * Rows the chart is meant to show: every row from the start of its first
+   * day to the end of today.
+   *
+   * Both bounds are whole days, because the chart is. Its first bar is a full
+   * calendar day, not the part of one that falls after "N × 24 hours ago", so
+   * counting from that exact instant comes up short by however many parcels
+   * were booked earlier that day. And the series stops at CURRENT_DATE, so a
+   * row dated later is rightly absent from it.
    */
-  const countInWindow = async (column: string, since: Date): Promise<number> => {
+  const countFromDay = async (column: string, firstDay: string): Promise<number> => {
     const [row] = await parcels.query<{ n: number }[]>(
       `SELECT count(*)::int AS n FROM parcels
-        WHERE "${column}" >= $1 AND "${column}"::date <= CURRENT_DATE`,
-      [since],
+        WHERE "${column}" >= $1::date AND "${column}"::date <= CURRENT_DATE`,
+      [firstDay],
     );
     return row.n;
   };
 
-  describe.each([7, 30, 90])('over %i days', (days) => {
+  // Several sizes, so the window's first day lands on different dates: it is
+  // the rows on that first day that a wrong boundary gets wrong.
+  describe.each([1, 7, 30, 45, 90])('over %i days', (days) => {
     it('runs, and returns numbers rather than Postgres strings', async () => {
       const trends = await service.getTrends(days);
 
@@ -106,18 +112,17 @@ describeLive('Dashboard trends against a real Postgres', () => {
       }
     });
 
-    it('agrees with a plain count of the same window', async () => {
-      const since = new Date(Date.now() - days * 86_400_000);
-      const [trends, created, delivered] = await Promise.all([
-        service.getTrends(days),
-        countInWindow('createdAt', since),
-        countInWindow('deliveredAt', since),
+    it('agrees with a plain count of the days it shows', async () => {
+      const trends = await service.getTrends(days);
+      const firstDay = trends.daily[0].date;
+      const [created, delivered] = await Promise.all([
+        countFromDay('createdAt', firstDay),
+        countFromDay('deliveredAt', firstDay),
       ]);
       const total = (key: 'created' | 'delivered') =>
         trends.daily.reduce((sum, day) => sum + day[key], 0);
 
-      // A parcel booked between the two queries would be off by one; the
-      // window boundary moving by milliseconds can do the same.
+      // Off by one only if a parcel is booked between the two queries.
       expect(Math.abs(total('created') - created)).toBeLessThanOrEqual(1);
       expect(Math.abs(total('delivered') - delivered)).toBeLessThanOrEqual(1);
     });
