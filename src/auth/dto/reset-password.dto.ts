@@ -1,6 +1,10 @@
 import { ApiProperty } from '@nestjs/swagger';
-import { IsHexadecimal, IsString, Length, MinLength } from 'class-validator';
+import { IsHexadecimal, IsString, Length } from 'class-validator';
 import { PASSWORD_MIN_LENGTH } from '../../common/constants/validation.constants';
+import {
+  IsNewPassword,
+  PASSWORD_RULES,
+} from '../../common/validators/password.validator';
 
 export class ResetPasswordDto {
   @ApiProperty({
@@ -12,8 +16,11 @@ export class ResetPasswordDto {
   @Length(64, 64, { message: 'token is not a valid reset token' })
   token!: string;
 
-  @ApiProperty({ format: 'password', minLength: PASSWORD_MIN_LENGTH })
-  @IsString()
-  @MinLength(PASSWORD_MIN_LENGTH)
+  @ApiProperty({
+    format: 'password',
+    minLength: PASSWORD_MIN_LENGTH,
+    description: `Must be ${PASSWORD_RULES}.`,
+  })
+  @IsNewPassword()
   newPassword!: string;
 }

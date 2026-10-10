@@ -1,3 +1,4 @@
+import { FeeBreakdownDto } from './quote-parcel.dto';
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { PageMetaDto } from '../../common/dto/paginated-response.dto';
 import { UserResponseDto } from '../../user/dto/user-response.dto';
@@ -94,7 +95,19 @@ export class ParcelResponseDto {
   @ApiPropertyOptional({ nullable: true, format: 'date-time' })
   deliveredAt!: Date | null;
 
-  @ApiPropertyOptional({ type: [ParcelStatusLogResponseDto] })
+  @ApiPropertyOptional({
+    type: FeeBreakdownDto,
+    nullable: true,
+    description:
+      'How `deliveryFee` was made up at booking. Null on parcels booked before the breakdown was recorded.',
+  })
+  feeBreakdown?: FeeBreakdownDto | null;
+
+  @ApiPropertyOptional({
+    type: [ParcelStatusLogResponseDto],
+    description:
+      'The timeline. Present on single-parcel responses; left out of lists.',
+  })
   statusLogs?: ParcelStatusLogResponseDto[];
 
   @ApiProperty({ format: 'date-time' })
@@ -118,4 +131,10 @@ export class ReindexResponseDto {
 
   @ApiProperty({ example: 204 })
   indexed!: number;
+
+  @ApiProperty({
+    example: 0,
+    description: 'Vectors dropped because their parcel no longer exists.',
+  })
+  removed!: number;
 }

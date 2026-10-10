@@ -1,6 +1,7 @@
 import { Test, TestingModule } from '@nestjs/testing';
 import { JwtAuthGuard } from '../../common/guards/jwt-auth.guard';
 import { RolesGuard } from '../../common/guards/roles.guard';
+import { RefreshCookieService } from '../../token/services/refresh-cookie.service';
 import { UserService } from '../services/user.service';
 import { QueryUsersDto } from '../dto/query-users.dto';
 import { UserController } from './user.controller';
@@ -14,7 +15,13 @@ describe('UserController', () => {
   beforeEach(async () => {
     const module: TestingModule = await Test.createTestingModule({
       controllers: [UserController],
-      providers: [{ provide: UserService, useValue: userService }],
+      providers: [
+        { provide: UserService, useValue: userService },
+        {
+          provide: RefreshCookieService,
+          useValue: { attach: jest.fn(), clear: jest.fn() },
+        },
+      ],
     })
       .overrideGuard(JwtAuthGuard)
       .useValue({ canActivate: () => true })

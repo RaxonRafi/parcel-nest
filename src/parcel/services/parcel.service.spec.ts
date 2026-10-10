@@ -7,6 +7,7 @@ import {
 } from '@nestjs/common';
 import { getRepositoryToken } from '@nestjs/typeorm';
 import { ConfigService } from '@nestjs/config';
+import { BackgroundService } from '../../common/background/background.service';
 import { PasswordResetService } from '../../auth/services/password-reset.service';
 import { RagService } from '../../rag/services/rag.service';
 import { ParcelNotificationService } from './parcel-notification.service';
@@ -31,11 +32,17 @@ describe('ParcelService — delivery personnel', () => {
     manager: { transaction: jest.Mock };
   };
   let statusLogRepository: { create: jest.Mock; save: jest.Mock };
-  let userService: { findDeliveryPersonnelOrFail: jest.Mock };
+  let userService: {
+    findDeliveryPersonnelOrFail: jest.Mock;
+    assertEmailVerified: jest.Mock;
+  };
+  let auditService: { record: jest.Mock };
+  let background: { run: jest.Mock };
   let ragService: {
     indexParcel: jest.Mock;
     indexParcels: jest.Mock;
     assertAvailable: jest.Mock;
+    pruneParcelsExcept: jest.Mock;
   };
 
   const courier = {
@@ -79,11 +86,18 @@ describe('ParcelService — delivery personnel', () => {
       },
     };
     statusLogRepository = { create: jest.fn((v) => v), save: jest.fn() };
-    userService = { findDeliveryPersonnelOrFail: jest.fn() };
+    userService = {
+      findDeliveryPersonnelOrFail: jest.fn(),
+      assertEmailVerified: jest.fn(),
+    };
+    auditService = { record: jest.fn() };
+    // Indexing and notifying run behind the response; here they just queue.
+    background = { run: jest.fn() };
     ragService = {
       indexParcel: jest.fn(),
       indexParcels: jest.fn(),
       assertAvailable: jest.fn(),
+      pruneParcelsExcept: jest.fn().mockResolvedValue(0),
     };
 
     const module: TestingModule = await Test.createTestingModule({
@@ -102,18 +116,12 @@ describe('ParcelService — delivery personnel', () => {
         },
         { provide: ConfigService, useValue: { get: jest.fn() } },
         { provide: PasswordResetService, useValue: { issueClaim: jest.fn() } },
-        { provide: AuditService, useValue: { record: jest.fn() } },
+        { provide: AuditService, useValue: auditService },
+        { provide: BackgroundService, useValue: background },
       ],
     }).compile();
 
     service = module.get<ParcelService>(ParcelService);
-    // Re-index fires an outbound fetch; the assertions below don't need it.
-    jest
-      .spyOn(
-        service as unknown as { triggerParcelIndex: () => Promise<void> },
-        'triggerParcelIndex',
-      )
-      .mockResolvedValue(undefined);
   });
 
   describe('updateStatus as a courier', () => {
@@ -187,7 +195,7 @@ describe('ParcelService — delivery personnel', () => {
 
   describe('status transitions', () => {
     const move = (from: ParcelStatus, to: ParcelStatus) => {
-      const parcel = buildParcel({ status: from, deliveryPersonnel: null });
+      const parcel = buildParcel({ status: from, deliveryPersonnel: courier });
       parcelRepository.findOne.mockResolvedValue(parcel);
       parcelRepository.save.mockResolvedValue(parcel);
       return service.updateStatus('TRK-TEST', { status: to }, admin);
@@ -202,6 +210,29 @@ describe('ParcelService — delivery personnel', () => {
       [ParcelStatus.PENDING, ParcelStatus.CANCELLED],
     ])('allows %s → %s', async (from, to) => {
       await expect(move(from, to)).resolves.toBeDefined();
+    });
+
+    it('refuses PICKED_UP while no courier is assigned', async () => {
+      parcelRepository.findOne.mockResolvedValue(
+        buildParcel({ status: ParcelStatus.PENDING, deliveryPersonnel: null }),
+      );
+
+      await expect(
+        service.updateStatus(
+          'TRK-TEST',
+          { status: ParcelStatus.PICKED_UP },
+          admin,
+        ),
+      ).rejects.toThrow(/Assign a courier/);
+    });
+
+    it('queues the index and the notifications instead of awaiting them', async () => {
+      await move(ParcelStatus.PICKED_UP, ParcelStatus.IN_TRANSIT);
+
+      expect(background.run.mock.calls.map(([label]) => label)).toEqual([
+        'Indexing TRK-TEST',
+        'Notifying about TRK-TEST',
+      ]);
     });
 
     it('refuses the PENDING → DELIVERED jump', async () => {
@@ -459,6 +490,110 @@ describe('ParcelService — delivery personnel', () => {
     });
   });
 
+  describe('getDetails', () => {
+    const sender = { id: 'sender-1', role: Role.SENDER } as User;
+    const receiver = { id: 'receiver-1', role: Role.RECEIVER } as User;
+    const stranger = { id: 'stranger-1', role: Role.SENDER } as User;
+    const open = (viewer: User) => {
+      parcelRepository.findOne.mockResolvedValue(
+        buildParcel({ sender, receiver, deliveryPersonnel: courier }),
+      );
+      return service.getDetails('TRK-TEST', viewer);
+    };
+
+    it.each([
+      ['its sender', sender],
+      ['its receiver', receiver],
+      ['its courier', courier],
+      ['an admin', admin],
+    ])('opens for %s', async (_who, viewer) => {
+      await expect(open(viewer)).resolves.toMatchObject({
+        trackingId: 'TRK-TEST',
+      });
+    });
+
+    it('stays closed to anyone else', async () => {
+      await expect(open(stranger)).rejects.toBeInstanceOf(ForbiddenException);
+    });
+
+    it('stays closed to a courier it is not assigned to', async () => {
+      await expect(open(otherCourier)).rejects.toBeInstanceOf(
+        ForbiddenException,
+      );
+    });
+  });
+
+  describe('quote', () => {
+    it('prices with the same calculation booking uses', () => {
+      // Defaults: 60 covers the first kg, 25 per extra kg, 1% of the cash.
+      expect(service.quote({ weightKg: 3, codAmount: 500 })).toEqual({
+        baseFee: 60,
+        weightFee: 50,
+        codFee: 5,
+        total: 115,
+      });
+    });
+
+    it('assumes one kilogram, prepaid', () => {
+      expect(service.quote({})).toMatchObject({ total: 60 });
+    });
+  });
+
+  describe('audit trail', () => {
+    const sender = { id: 'sender-1', role: Role.SENDER } as User;
+    const receiver = { id: 'receiver-1', role: Role.RECEIVER } as User;
+    const actionsRecorded = () =>
+      auditService.record.mock.calls.map(([entry]) => entry.action);
+
+    it('records a sender cancelling', async () => {
+      parcelRepository.findOne.mockResolvedValue(
+        buildParcel({ status: ParcelStatus.PENDING, sender }),
+      );
+
+      await service.cancelParcel('TRK-TEST', sender);
+
+      expect(actionsRecorded()).toEqual(['PARCEL_CANCELLED']);
+    });
+
+    it('records a receiver confirming', async () => {
+      parcelRepository.findOne.mockResolvedValue(
+        buildParcel({ status: ParcelStatus.OUT_FOR_DELIVERY, receiver }),
+      );
+
+      await service.confirmDelivery('TRK-TEST', receiver);
+
+      expect(actionsRecorded()).toEqual(['PARCEL_DELIVERY_CONFIRMED']);
+    });
+
+    it('records proof, with what was handed over', async () => {
+      parcelRepository.findOne.mockResolvedValue(
+        buildParcel({
+          status: ParcelStatus.OUT_FOR_DELIVERY,
+          deliveryPersonnel: courier,
+          receiverName: 'Jane Doe',
+          codAmount: 500,
+        }),
+      );
+
+      await service.submitDeliveryProof(
+        'TRK-TEST',
+        { images: ['https://cdn.example.com/a.jpg'], codCollected: true },
+        courier,
+      );
+
+      expect(auditService.record).toHaveBeenCalledWith(
+        expect.objectContaining({
+          action: 'PARCEL_PROOF_SUBMITTED',
+          metadata: expect.objectContaining({
+            images: 1,
+            receivedBy: 'Jane Doe',
+            codCollected: true,
+          }),
+        }),
+      );
+    });
+  });
+
   describe('reindexAll', () => {
     const sender = { id: 'sender-1' } as User;
     const receiver = { id: 'receiver-1' } as User;
@@ -482,7 +617,10 @@ describe('ParcelService — delivery personnel', () => {
         ])
         .mockResolvedValueOnce([]);
 
-      await expect(service.reindexAll()).resolves.toEqual({ indexed: 2 });
+      await expect(service.reindexAll()).resolves.toEqual({
+        indexed: 2,
+        removed: 0,
+      });
 
       expect(ragService.indexParcels).toHaveBeenCalledTimes(1);
       expect(ragService.indexParcels).toHaveBeenCalledWith([
@@ -503,7 +641,7 @@ describe('ParcelService — delivery personnel', () => {
         .mockResolvedValueOnce([stored('b')])
         .mockResolvedValueOnce([]);
 
-      await expect(service.reindexAll()).resolves.toEqual({ indexed: 2 });
+      await expect(service.reindexAll()).resolves.toMatchObject({ indexed: 2 });
 
       const wheres = parcelRepository.find.mock.calls.map(
         ([options]: [{ where: { id?: { value: string } } }]) =>
@@ -529,6 +667,21 @@ describe('ParcelService — delivery personnel', () => {
       expect(ragService.indexParcels).toHaveBeenCalledWith([
         expect.objectContaining({ notes: 'left the hub' }),
       ]);
+    });
+
+    it('then drops vectors whose parcel is gone, keeping the ones it saw', async () => {
+      parcelRepository.find
+        .mockResolvedValueOnce([stored('a'), stored('b')])
+        .mockResolvedValueOnce([]);
+      ragService.pruneParcelsExcept.mockResolvedValue(3);
+
+      await expect(service.reindexAll()).resolves.toEqual({
+        indexed: 2,
+        removed: 3,
+      });
+      expect(ragService.pruneParcelsExcept).toHaveBeenCalledWith(
+        new Set(['a', 'b']),
+      );
     });
 
     it('reads nothing when the assistant is switched off', async () => {

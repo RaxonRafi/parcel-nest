@@ -7,7 +7,8 @@ Backend review of the Parcel Delivery API. See [`README.md`](./README.md) for se
 ## 🐞 Known issues and bugs
 
 The bugs found in the 2026-10-10 review were fixed the same day on branch
-`fix/review-bugs`. Client-facing effects are in
+`fix/review-bugs`, and a follow-up pass on `development` closed most of what
+that left open. Both are merged to `master`. Client-facing effects are in
 [`FRONTEND_GUIDE.md`](./FRONTEND_GUIDE.md).
 
 State after the fixes: `npm run lint` clean, `npx tsc --noEmit` clean,
@@ -88,21 +89,28 @@ State after the fixes: `npm run lint` clean, `npx tsc --noEmit` clean,
 
 ### Still open
 
-- **The HuggingFace account has no credits left.** Every embedding request
-  answers `402`, so `ask` and `ask/stream` fail on any real question, and PDF
-  upload and parcel indexing fail too. Top the account up or replace
-  `HUGGINGFACE_API_KEY`.
-- **200 of 204 parcels are not in the assistant's index**, so it cannot answer
-  about them for anyone. Call `POST /api/parcels/reindex` once embeddings work
-  again. The route is unit- and e2e-tested but has not completed a live run.
-- **Answer quality with real embeddings is unverified.** The Pinecone checks
-  above used stand-in vectors because of the credit problem; storage,
-  filtering and deletion are confirmed, ranking is not.
-- **Production database:** the migrations were verified on the database in the
-  local `.env` only.
-- **Audit writes stay outside the parcel transaction** on purpose: a failed
-  audit insert must not undo the action it describes. Not a defect.
-- `sqlite3` is a dev dependency that nothing imports any more.
+Re-checked at the end of 2026-10-10. In the order they need doing:
+
+1. **The HuggingFace account has no credits left.** Every embedding request
+   answers `402`, so `ask` and `ask/stream` fail on any real question, and PDF
+   upload and parcel indexing fail too. Wait for the monthly allowance to
+   reset, add credits, or put a key from another account in
+   `HUGGINGFACE_API_KEY`. Nothing below it on this list can move until then.
+2. **200 of 204 parcels are not in the assistant's index**, so it cannot answer
+   about them for anyone. Call `POST /api/parcels/reindex` as an admin (the
+   "full re-index" button on the client's knowledge page) once embeddings
+   work. The route is unit- and e2e-tested but has not completed a live run.
+3. **Answer quality with real embeddings is unverified.** The Pinecone checks
+   above used stand-in vectors because of the credit problem; storage,
+   filtering and deletion are confirmed, ranking is not. Ask a few real
+   questions as a sender, a receiver and an admin after step 2.
+4. **Production database:** the migrations were verified on the database in the
+   local `.env` only. Run `npm run migration:show` against any other one.
+5. `sqlite3` is a dev dependency that nothing imports any more; remove it.
+
+**Not a defect, recorded so it is not "fixed" by mistake:** audit writes stay
+outside the parcel transaction on purpose. A failed audit insert must not undo
+the action it describes.
 
 ---
 
@@ -157,8 +165,9 @@ State after the fixes: `npm run lint` clean, `npx tsc --noEmit` clean,
   instances.
 - Gate Swagger UI in production.
 - Turn on `strict` in `tsconfig.json` (`noImplicitAny` is off).
-- More tests: dashboard trends against a real Postgres, password reset and
-  email verification services, mail templates.
+- More tests: an automated run of dashboard trends against a real Postgres (it
+  has only been checked by hand), password reset and email verification
+  services, mail templates.
 - CI (lint, type-check, unit, e2e against a Postgres service container) and a
   `Dockerfile` — realtime needs a long-running host, which Vercel is not.
 

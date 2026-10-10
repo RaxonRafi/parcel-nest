@@ -99,7 +99,7 @@ describe('RealtimeGateway', () => {
     await expect(connect('blocked-token')).rejects.toThrow('unauthorized');
   });
 
-  it('delivers to the targeted user and role, and skips the actor', async () => {
+  it('delivers to the addressed user and nobody else', async () => {
     const sender = await connect('sender-token');
     const admin = await connect('admin-token');
 
@@ -107,20 +107,20 @@ describe('RealtimeGateway', () => {
     const adminGot = jest.fn();
     admin.on(NOTIFICATION_EVENT, adminGot);
 
-    // The admin made the change: the sender hears about it, the admin does not.
-    realtime.notify(
-      { userIds: ['sender-1'], roles: [Role.ADMIN], exceptUserId: 'admin-1' },
-      payload,
-    );
+    const stored = {
+      ...payload,
+      id: 'inbox-row-1',
+      createdAt: new Date().toISOString(),
+    };
+    realtime.push('sender-1', stored);
 
-    await expect(forSender).resolves.toMatchObject(payload);
+    // The push carries the id of the user's own inbox row, untouched.
+    await expect(forSender).resolves.toEqual(stored);
     expect(adminGot).not.toHaveBeenCalled();
 
     const forAdmin = nextNotification(admin);
-    realtime.notify({ roles: [Role.ADMIN] }, payload);
-    const received = await forAdmin;
-    expect(received.id).toEqual(expect.any(String));
-    expect(Number.isNaN(Date.parse(received.createdAt))).toBe(false);
+    realtime.push('admin-1', { ...stored, id: 'inbox-row-2' });
+    await expect(forAdmin).resolves.toMatchObject({ id: 'inbox-row-2' });
   });
 
   it('drops the sockets of a user who is blocked while connected', async () => {

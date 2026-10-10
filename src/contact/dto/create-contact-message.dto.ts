@@ -50,4 +50,13 @@ export class CreateContactMessageDto {
   })
   @Transform(trimString)
   message!: string;
+
+  @ApiPropertyOptional({
+    description:
+      'Honeypot. Render it as a field people cannot see and leave it empty; a submission that fills it in is silently discarded.',
+  })
+  @IsOptional()
+  @IsString()
+  @MaxLength(200)
+  website?: string;
 }

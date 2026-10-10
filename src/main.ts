@@ -2,9 +2,12 @@ import { INestApplication, Logger } from '@nestjs/common';
 import { NestFactory } from '@nestjs/core';
 import { NestExpressApplication } from '@nestjs/platform-express';
 import { IoAdapter } from '@nestjs/platform-socket.io';
+import { createAdapter } from '@socket.io/redis-adapter';
 import type { Request, RequestHandler, Response } from 'express';
-import { ServerOptions } from 'socket.io';
+import Redis from 'ioredis';
+import { Server, ServerOptions } from 'socket.io';
 import { AppModule } from './app.module';
+import { REQUEST_ID_HEADER } from './common/middleware/request-context.middleware';
 import { THROTTLER_NAMES } from './common/throttler.config';
 import { configureApp } from './config/app.config';
 import { setupSwagger } from './config/swagger.config';
@@ -24,27 +27,52 @@ const DEFAULT_ORIGINS = [
  * wait. The throttler suffixes the header with the name of the limit that was
  * hit, except for `default`.
  */
-const RATE_LIMIT_HEADERS = THROTTLER_NAMES.map((name) =>
-  name === 'default' ? 'Retry-After' : `Retry-After-${name}`,
-);
+const EXPOSED_HEADERS = [
+  ...THROTTLER_NAMES.map((name) =>
+    name === 'default' ? 'Retry-After' : `Retry-After-${name}`,
+  ),
+  // So the client can quote the id when something goes wrong.
+  REQUEST_ID_HEADER,
+];
 
 /** Memoised so concurrent cold-start requests share one boot. */
 let appPromise: Promise<INestApplication> | undefined;
 
-/** Applies the HTTP CORS allow-list to the Socket.IO handshake as well. */
+/**
+ * Applies the HTTP CORS allow-list to the Socket.IO handshake as well.
+ *
+ * With `REDIS_URL` set it also fans events out through Redis, so a push
+ * emitted on one instance reaches a client connected to another. Without it
+ * rooms live in one process, which is only correct for a single instance.
+ */
 class CorsIoAdapter extends IoAdapter {
   constructor(
     host: INestApplication,
     private readonly origins: string[],
+    private readonly redisUrl?: string,
   ) {
     super(host);
   }
 
   createIOServer(port: number, options?: ServerOptions) {
-    return super.createIOServer(port, {
+    const server = super.createIOServer(port, {
       ...options,
       cors: { origin: this.origins, credentials: true },
-    }) as unknown;
+    }) as Server;
+
+    if (this.redisUrl) {
+      const pub = new Redis(this.redisUrl);
+      const sub = pub.duplicate();
+      for (const client of [pub, sub]) {
+        client.on('error', (error: Error) =>
+          logger.warn(`Socket.IO Redis adapter: ${error.message}`),
+        );
+      }
+      server.adapter(createAdapter(pub, sub));
+      logger.log('Socket.IO is using the Redis adapter');
+    }
+
+    return server as unknown;
   }
 }
 
@@ -89,14 +117,20 @@ async function createApp(): Promise<INestApplication> {
   app.enableCors({
     origin: origins,
     credentials: true,
-    exposedHeaders: RATE_LIMIT_HEADERS,
+    exposedHeaders: EXPOSED_HEADERS,
   });
-  app.useWebSocketAdapter(new CorsIoAdapter(app, origins));
+  app.useWebSocketAdapter(
+    new CorsIoAdapter(app, origins, process.env.REDIS_URL?.trim() || undefined),
+  );
   setupSwagger(app);
 
   // ✅ Local and long-running hosts: listen on a port. WebSockets need this —
   // a Vercel function cannot hold a connection open.
   if (!process.env.VERCEL) {
+    // SIGTERM from the host: stop accepting connections, close the pool and
+    // let queued background work finish. A serverless function is frozen,
+    // not signalled, so there is nothing to hook there.
+    app.enableShutdownHooks();
     await app.listen(process.env.PORT ?? 3000);
     logger.log(
       `🚀 Server running on http://localhost:${process.env.PORT ?? 3000}/api`,

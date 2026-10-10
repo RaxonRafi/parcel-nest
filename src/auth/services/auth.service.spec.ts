@@ -1,5 +1,9 @@
 import { Test, TestingModule } from '@nestjs/testing';
-import { BadRequestException, UnauthorizedException } from '@nestjs/common';
+import {
+  BadRequestException,
+  HttpException,
+  UnauthorizedException,
+} from '@nestjs/common';
 import { User } from '../../user/entities/user.entity';
 import { UserService } from '../../user/services/user.service';
 import { TokenService } from '../../token/services/token.service';
@@ -36,6 +40,9 @@ describe('AuthService', () => {
       getSignInBlockReason: jest.fn().mockReturnValue(null),
       setPassword: jest.fn(),
       markVerified: jest.fn(),
+      lockRemainingMs: jest.fn().mockReturnValue(0),
+      recordFailedLogin: jest.fn(),
+      clearFailedLogins: jest.fn(),
     };
     const tokenService = {
       createUserTokens: jest.fn().mockReturnValue(pair),
@@ -45,9 +52,13 @@ describe('AuthService', () => {
     };
     sessionService = {
       record: jest.fn(),
-      assertActive: jest.fn(),
+      assertActive: jest
+        .fn()
+        .mockResolvedValue({ id: 'row-1', familyId: 'family-1' }),
       revoke: jest.fn().mockResolvedValue(true),
       revokeAllForUser: jest.fn().mockResolvedValue(2),
+      listForUser: jest.fn().mockResolvedValue([]),
+      revokeById: jest.fn(),
     };
     passwordResetService = {
       issue: jest.fn(),
@@ -87,7 +98,59 @@ describe('AuthService', () => {
         user,
         'refresh',
         expect.any(Date),
+        {},
       );
+    });
+
+    it('remembers which device signed in', async () => {
+      const context = { userAgent: 'Firefox', ip: '203.0.113.7' };
+
+      await service.login({ email: user.email, password: 'pw' }, context);
+
+      expect(sessionService.record).toHaveBeenCalledWith(
+        user,
+        'refresh',
+        expect.any(Date),
+        context,
+      );
+    });
+
+    it('counts a wrong password against the account', async () => {
+      userService.verifyPassword.mockResolvedValue(false);
+
+      await expect(
+        service.login({ email: user.email, password: 'nope' }),
+      ).rejects.toBeInstanceOf(UnauthorizedException);
+      expect(userService.recordFailedLogin).toHaveBeenCalledWith(user);
+    });
+
+    it('has nothing to count for an unknown address', async () => {
+      userService.findByEmail.mockResolvedValue(null);
+
+      await expect(
+        service.login({ email: 'nobody@x.com', password: 'pw' }),
+      ).rejects.toBeInstanceOf(UnauthorizedException);
+      expect(userService.recordFailedLogin).not.toHaveBeenCalled();
+    });
+
+    it('refuses a locked account before looking at the password', async () => {
+      userService.lockRemainingMs.mockReturnValue(9 * 60_000 + 1);
+
+      const attempt = service.login({ email: user.email, password: 'pw' });
+
+      await expect(attempt).rejects.toBeInstanceOf(HttpException);
+      await expect(attempt).rejects.toMatchObject({ status: 429 });
+      await expect(attempt).rejects.toThrow(/10 minutes/);
+      // The right password must not get through, nor extend the lock.
+      expect(userService.verifyPassword).not.toHaveBeenCalled();
+      expect(userService.recordFailedLogin).not.toHaveBeenCalled();
+      expect(sessionService.record).not.toHaveBeenCalled();
+    });
+
+    it('wipes the failed-attempt count on success', async () => {
+      await service.login({ email: user.email, password: 'pw' });
+
+      expect(userService.clearFailedLogins).toHaveBeenCalledWith(user);
     });
 
     it('never says which half of the credentials was wrong', async () => {
@@ -126,13 +189,36 @@ describe('AuthService', () => {
       const result = await service.refreshAccessToken('old-refresh');
 
       expect(sessionService.assertActive).toHaveBeenCalledWith('old-refresh');
-      expect(sessionService.revoke).toHaveBeenCalledWith('old-refresh');
+      // Marked as a rotation, which is what makes a later reuse detectable.
+      expect(sessionService.revoke).toHaveBeenCalledWith(
+        'old-refresh',
+        undefined,
+        'rotated',
+      );
       expect(sessionService.record).toHaveBeenCalledWith(
         user,
         'refresh',
         expect.any(Date),
+        // The new token stays in the family of the one it replaced.
+        { familyId: 'family-1' },
       );
       expect(result).toEqual(pair);
+    });
+
+    it('roots the family at a token from before families existed', async () => {
+      sessionService.assertActive.mockResolvedValue({
+        id: 'legacy-row',
+        familyId: null,
+      });
+
+      await service.refreshAccessToken('old-refresh');
+
+      expect(sessionService.record).toHaveBeenCalledWith(
+        user,
+        'refresh',
+        expect.any(Date),
+        { familyId: 'legacy-row' },
+      );
     });
 
     it('refuses the loser when one token is exchanged twice at once', async () => {
@@ -174,6 +260,23 @@ describe('AuthService', () => {
     });
   });
 
+  describe('sessions', () => {
+    it("lists the caller's own devices", async () => {
+      await service.listSessions(user, 'cookie-token');
+
+      expect(sessionService.listForUser).toHaveBeenCalledWith(
+        user.id,
+        'cookie-token',
+      );
+    });
+
+    it('signs one device out, scoped to the caller', async () => {
+      await service.endSession(user, 'row-7');
+
+      expect(sessionService.revokeById).toHaveBeenCalledWith('row-7', user.id);
+    });
+  });
+
   describe('forgotPassword', () => {
     it('issues a grant for a real account', async () => {
       await service.forgotPassword(user.email);
@@ -207,7 +310,16 @@ describe('AuthService', () => {
         user,
         'NewPassw0rd!',
       );
-      expect(sessionService.revokeAllForUser).toHaveBeenCalledWith(user.id);
+      expect(sessionService.revokeAllForUser).toHaveBeenCalledWith(
+        user.id,
+        'security',
+      );
+    });
+
+    it('lifts a sign-in lock — the owner has proved who they are', async () => {
+      await service.resetPassword('a'.repeat(64), 'NewPassw0rd!');
+
+      expect(userService.clearFailedLogins).toHaveBeenCalledWith(user);
     });
 
     it('marks the address verified — the link proved it', async () => {
@@ -236,7 +348,10 @@ describe('AuthService', () => {
         newPassword: 'NewPassw0rd!',
       });
 
-      expect(sessionService.revokeAllForUser).toHaveBeenCalledWith(user.id);
+      expect(sessionService.revokeAllForUser).toHaveBeenCalledWith(
+        user.id,
+        'security',
+      );
     });
 
     it('refuses an account with no password set', async () => {

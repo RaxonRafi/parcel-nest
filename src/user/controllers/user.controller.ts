@@ -1,12 +1,15 @@
 import {
   Body,
   Controller,
+  Delete,
   Get,
   Headers,
   Param,
+  ParseUUIDPipe,
   Patch,
   Post,
   Query,
+  Res,
   UseGuards,
 } from '@nestjs/common';
 import {
@@ -18,16 +21,24 @@ import {
   ApiTags,
 } from '@nestjs/swagger';
 import { Throttle } from '@nestjs/throttler';
+import type { Response } from 'express';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { Roles } from '../../common/decorators/roles.decorator';
 import { JwtAuthGuard } from '../../common/guards/jwt-auth.guard';
 import { RolesGuard } from '../../common/guards/roles.guard';
 import { AuthResponse } from '../../auth/types/auth.types';
-import { AuthResponseDto } from '../../auth/dto/auth-response.dto';
+import {
+  AuthResponseDto,
+  MessageResponseDto,
+} from '../../auth/dto/auth-response.dto';
+import { MessageResponse } from '../../auth/types/auth.types';
 import { JWT_AUTH } from '../../config/swagger.config';
+import { RefreshCookieService } from '../../token/services/refresh-cookie.service';
 import { PaginationQueryDto } from '../../common/dto/pagination-query.dto';
 import { Paginated } from '../../common/types/paginated.type';
+import { AdminUpdateUserDto } from '../dto/admin-update-user.dto';
 import { CreateUserDto } from '../dto/create-user.dto';
+import { DeleteAccountDto } from '../dto/delete-account.dto';
 import { QueryUsersDto } from '../dto/query-users.dto';
 import { UpdateProfileDto } from '../dto/update-profile.dto';
 import { PaginatedUsersDto, UserResponseDto } from '../dto/user-response.dto';
@@ -39,7 +50,10 @@ import { UserService } from '../services/user.service';
 @ApiTags('Users')
 @Controller('users')
 export class UserController {
-  constructor(private readonly userService: UserService) {}
+  constructor(
+    private readonly userService: UserService,
+    private readonly refreshCookie: RefreshCookieService,
+  ) {}
 
   @ApiOperation({
     summary: 'Register an account',
@@ -58,9 +72,13 @@ export class UserController {
   @Post('register')
   async register(
     @Body() payload: CreateUserDto,
+    @Res({ passthrough: true }) res: Response,
     @Headers('authorization') authorization?: string,
-  ): Promise<AuthResponse> {
-    return this.userService.register(payload, authorization);
+  ): Promise<Partial<AuthResponse>> {
+    const result = await this.userService.register(payload, authorization);
+
+    // An admin creating another admin is not signing in as them.
+    return authorization ? result : this.refreshCookie.attach(res, result);
   }
 
   @ApiBearerAuth(JWT_AUTH)
@@ -82,6 +100,28 @@ export class UserController {
   @Get('me')
   async getProfile(@CurrentUser() user: User): Promise<SafeUser> {
     return this.userService.getProfile(user.id);
+  }
+
+  @ApiBearerAuth(JWT_AUTH)
+  @ApiOperation({
+    summary: 'Delete your own account',
+    description:
+      'Needs your current password. The account can no longer sign in and every session ends at once; parcels and history that refer to it are kept. The email address stays reserved.',
+  })
+  @ApiResponse({ status: 200, type: MessageResponseDto })
+  @ApiResponse({ status: 401, description: 'Password does not match' })
+  @ApiResponse({ status: 403, description: 'The super admin cannot be deleted' })
+  @UseGuards(JwtAuthGuard)
+  @Throttle({ auth: { limit: 8, ttl: 60_000 } })
+  @Delete('me')
+  async deleteOwnAccount(
+    @CurrentUser() user: User,
+    @Body() payload: DeleteAccountDto,
+    @Res({ passthrough: true }) res: Response,
+  ): Promise<MessageResponse> {
+    await this.userService.deleteOwnAccount(user, payload.password);
+    this.refreshCookie.clear(res);
+    return { message: 'Your account has been deleted' };
   }
 
   @ApiBearerAuth(JWT_AUTH)
@@ -140,6 +180,54 @@ export class UserController {
   }
 
   @ApiBearerAuth(JWT_AUTH)
+  @ApiOperation({
+    summary: 'Edit a user',
+    description:
+      'Admin only. Name, contact details, national ID, role and the verified flag. Email and password are not editable here. Recorded in the audit trail.',
+  })
+  @ApiParam({ name: 'id', format: 'uuid' })
+  @ApiResponse({ status: 200, type: UserResponseDto })
+  @ApiResponse({
+    status: 403,
+    description: 'Changing your own role, or the super admin’s',
+  })
+  @ApiResponse({ status: 404, description: 'No such user' })
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(Role.ADMIN)
+  @Patch(':id')
+  async adminUpdateUser(
+    @Param('id', new ParseUUIDPipe()) id: string,
+    @Body() payload: AdminUpdateUserDto,
+    @CurrentUser() actor: User,
+  ): Promise<SafeUser> {
+    return this.userService.adminUpdateUser(id, payload, actor);
+  }
+
+  @ApiBearerAuth(JWT_AUTH)
+  @ApiOperation({
+    summary: 'Delete a user',
+    description:
+      'Admin only. Soft delete: the account can no longer sign in and its sessions end, but parcels and history that refer to it are kept. Recorded in the audit trail.',
+  })
+  @ApiParam({ name: 'id', format: 'uuid' })
+  @ApiResponse({ status: 200, type: MessageResponseDto })
+  @ApiResponse({
+    status: 403,
+    description: 'Deleting yourself here, or the super admin',
+  })
+  @ApiResponse({ status: 404, description: 'No such user' })
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(Role.ADMIN)
+  @Delete(':id')
+  async adminDeleteUser(
+    @Param('id', new ParseUUIDPipe()) id: string,
+    @CurrentUser() actor: User,
+  ): Promise<MessageResponse> {
+    await this.userService.adminDeleteUser(id, actor);
+    return { message: 'User deleted' };
+  }
+
+  @ApiBearerAuth(JWT_AUTH)
   @ApiOperation({ summary: 'Block a user', description: 'Admin only.' })
   @ApiParam({ name: 'userId', format: 'uuid' })
   @ApiResponse({ status: 200, type: UserResponseDto })
@@ -171,11 +259,15 @@ export class UserController {
   @ApiOperation({
     summary: 'Approve a courier application',
     description:
-      'Admin only. Promotes `PENDING_DELIVERY` to `DELIVERY_PERSONNEL`.',
+      'Admin only. Promotes `PENDING_DELIVERY` to `DELIVERY_PERSONNEL` and emails the applicant. Refused until the applicant has a national ID number and a photo of it on their profile.',
   })
   @ApiParam({ name: 'userId', format: 'uuid' })
   @ApiResponse({ status: 200, type: UserResponseDto })
-  @ApiResponse({ status: 400, description: 'User has no pending application' })
+  @ApiResponse({
+    status: 400,
+    description:
+      'User has no pending application, or the application has no national ID number and photo',
+  })
   @UseGuards(JwtAuthGuard, RolesGuard)
   @Roles(Role.ADMIN)
   @Patch(':userId/delivery/approve')
@@ -190,7 +282,7 @@ export class UserController {
   @ApiOperation({
     summary: 'Reject a courier application',
     description:
-      'Admin only. Drops the account back to `SENDER`, so the person keeps a usable account and can re-apply.',
+      'Admin only. Drops the account back to `SENDER`, so the person keeps a usable account and can re-apply. The applicant is emailed the decision.',
   })
   @ApiParam({ name: 'userId', format: 'uuid' })
   @ApiResponse({ status: 200, type: UserResponseDto })

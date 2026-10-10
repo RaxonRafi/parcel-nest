@@ -10,13 +10,15 @@ import { AppController } from '../src/app.controller';
 import { AppService } from '../src/app.service';
 import { AuditModule } from '../src/audit/audit.module';
 import { AuthModule } from '../src/auth/auth.module';
-import { UniqueViolationFilter } from '../src/common/filters/unique-violation.filter';
+import { BackgroundModule } from '../src/common/background/background.module';
+import { AllExceptionsFilter } from '../src/common/filters/all-exceptions.filter';
 import { THROTTLER_CONFIG } from '../src/common/throttler.config';
 import { ENTITIES } from '../src/config/database.config';
 import { ContactModule } from '../src/contact/contact.module';
 import { DashboardModule } from '../src/dashboard/dashboard.module';
 import { KeepAliveModule } from '../src/keep-alive/keep-alive.module';
 import { MailModule } from '../src/mail/mail.module';
+import { NotificationModule } from '../src/notification/notification.module';
 import { ParcelModule } from '../src/parcel/parcel.module';
 import { RagModule } from '../src/rag/rag.module';
 import { TokenModule } from '../src/token/token.module';
@@ -88,11 +90,13 @@ async function createInMemoryDataSource(
       }),
       dataSourceFactory: createInMemoryDataSource,
     }),
+    BackgroundModule,
     MailModule,
     TokenModule,
     UserModule,
     AuthModule,
     ParcelModule,
+    NotificationModule,
     DashboardModule,
     AuditModule,
     RagModule,
@@ -103,7 +107,7 @@ async function createInMemoryDataSource(
   providers: [
     AppService,
     { provide: APP_GUARD, useClass: ThrottlerGuard },
-    { provide: APP_FILTER, useClass: UniqueViolationFilter },
+    { provide: APP_FILTER, useClass: AllExceptionsFilter },
   ],
 })
 export class TestAppModule {}

@@ -50,6 +50,18 @@ export class User {
   @Column({ type: 'simple-array', default: '' })
   nidImage!: string[];
 
+  /** Parcel update emails. Account and security mail is sent regardless. */
+  @Column({ default: true })
+  emailNotifications!: boolean;
+
+  /** Wrong passwords since the last successful sign-in. Never leaves the API. */
+  @Column({ type: 'int', default: 0 })
+  failedLoginAttempts!: number;
+
+  /** Sign-in is refused until this passes. Never leaves the API. */
+  @Column({ type: 'timestamptz', nullable: true })
+  lockedUntil!: Date | null;
+
   @OneToMany(() => AuthProvider, (auth) => auth.user, {
     cascade: true,
     eager: true,

@@ -7,6 +7,7 @@ import { ConfigService } from '@nestjs/config';
 import { EmailVerificationService } from '../../auth/services/email-verification.service';
 import { PasswordResetService } from '../../auth/services/password-reset.service';
 import { SessionService } from '../../auth/services/session.service';
+import { NotificationService } from '../../notification/services/notification.service';
 import { createClient, SupabaseClient } from '@supabase/supabase-js';
 
 const KEEP_ALIVE_ROW_ID = 1;
@@ -21,11 +22,13 @@ export class KeepAliveService {
     private readonly sessionService: SessionService,
     private readonly passwordResetService: PasswordResetService,
     private readonly emailVerificationService: EmailVerificationService,
+    private readonly notificationService: NotificationService,
   ) {}
 
   /**
-   * Deletes expired refresh tokens and single-use grants. Nothing reads an
-   * expired row again, so without this the three tables only ever grow.
+   * Deletes expired refresh tokens and single-use grants, and notifications
+   * past their retention. Nothing reads such a row again, so without this the
+   * tables only ever grow.
    *
    * Never throws: housekeeping failing must not fail the keep-alive ping.
    */
@@ -35,10 +38,11 @@ export class KeepAliveService {
         this.sessionService.pruneExpired(),
         this.passwordResetService.pruneExpired(),
         this.emailVerificationService.pruneExpired(),
+        this.notificationService.pruneOld(),
       ]);
       const total = removed.reduce((sum, count) => sum + count, 0);
 
-      this.logger.log(`Pruned ${total} expired token rows`);
+      this.logger.log(`Pruned ${total} expired rows`);
       return total;
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Unknown error';

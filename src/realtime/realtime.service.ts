@@ -1,20 +1,10 @@
 import { Injectable, Logger } from '@nestjs/common';
-import { randomUUID } from 'crypto';
-import { Role } from '../user/types/user.types';
 import { RealtimeGateway } from './realtime.gateway';
 import {
   NOTIFICATION_EVENT,
   RealtimeNotification,
-  roleRoom,
   userRoom,
 } from './realtime.types';
-
-export interface NotifyTarget {
-  userIds?: (string | null | undefined)[];
-  roles?: Role[];
-  /** Usually the actor — nobody needs telling about their own click. */
-  exceptUserId?: string | null;
-}
 
 /**
  * Fire-and-forget pushes to connected dashboards. Never throws: a parcel
@@ -26,32 +16,19 @@ export class RealtimeService {
 
   constructor(private readonly gateway: RealtimeGateway) {}
 
-  notify(
-    target: NotifyTarget,
-    notification: Omit<RealtimeNotification, 'id' | 'createdAt'>,
-  ): void {
+  /**
+   * Sends one user their copy of a notification, on every device they have
+   * open. Addressed per user rather than broadcast to a role, because each
+   * copy carries the id of that user's own inbox row.
+   */
+  push(userId: string, notification: RealtimeNotification): void {
     // No server on a serverless host, where the gateway never initialises.
+    // The notification is still in the user's inbox; only the push is lost.
     const server = this.gateway.server;
     if (!server) return;
 
-    const rooms = [
-      ...(target.userIds ?? [])
-        .filter((id): id is string => !!id)
-        .map(userRoom),
-      ...(target.roles ?? []).map(roleRoom),
-    ];
-    if (rooms.length === 0) return;
-
     try {
-      let broadcast = server.to(rooms);
-      if (target.exceptUserId) {
-        broadcast = broadcast.except(userRoom(target.exceptUserId));
-      }
-      broadcast.emit(NOTIFICATION_EVENT, {
-        ...notification,
-        id: randomUUID(),
-        createdAt: new Date().toISOString(),
-      } satisfies RealtimeNotification);
+      server.to(userRoom(userId)).emit(NOTIFICATION_EVENT, notification);
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Unknown error';
       this.logger.warn(`Realtime push failed: ${message}`);

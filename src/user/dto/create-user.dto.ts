@@ -10,12 +10,15 @@ import {
   IsUrl,
   Matches,
   MaxLength,
-  MinLength,
 } from 'class-validator';
 import {
   PASSWORD_MIN_LENGTH,
   PHONE_REGEX,
 } from '../../common/constants/validation.constants';
+import {
+  IsNewPassword,
+  PASSWORD_RULES,
+} from '../../common/validators/password.validator';
 import { Role } from '../types/user.types';
 import { trimString } from '../../common/utils/trim.transform';
 
@@ -36,9 +39,9 @@ export class CreateUserDto {
     format: 'password',
     minLength: PASSWORD_MIN_LENGTH,
     example: 'Passw0rd!',
+    description: `Must be ${PASSWORD_RULES}.`,
   })
-  @IsString()
-  @MinLength(PASSWORD_MIN_LENGTH)
+  @IsNewPassword()
   password!: string;
 
   @ApiPropertyOptional({

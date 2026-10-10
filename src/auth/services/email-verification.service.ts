@@ -1,4 +1,4 @@
-import { BadRequestException, Injectable, Logger } from '@nestjs/common';
+import { BadRequestException, Injectable } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { InjectRepository } from '@nestjs/typeorm';
 import { randomBytes } from 'crypto';
@@ -15,8 +15,6 @@ const EXPIRY_HOURS = 24;
 /** Sole owner of the `email_verifications` table. */
 @Injectable()
 export class EmailVerificationService {
-  private readonly logger = new Logger(EmailVerificationService.name);
-
   constructor(
     @InjectRepository(EmailVerification)
     private readonly repository: Repository<EmailVerification>,
@@ -24,7 +22,7 @@ export class EmailVerificationService {
     private readonly config: ConfigService,
   ) {}
 
-  /** Issues a grant and emails it. Never throws — see the catch below. */
+  /** Issues a grant and queues its email. A mail outage cannot fail it. */
   async issue(user: User): Promise<void> {
     if (user.isVerified) {
       return;
@@ -52,16 +50,9 @@ export class EmailVerificationService {
       EXPIRY_HOURS,
     );
 
-    try {
-      await this.mailService.send(user.email, subject, html, text);
-    } catch (error) {
-      // Registration must not fail because the mail server is down; the user
-      // can ask for another link from `resend-verification`.
-      const message = error instanceof Error ? error.message : 'Unknown error';
-      this.logger.error(
-        `Verification email to ${user.email} could not be sent: ${message}`,
-      );
-    }
+    // Registration must not fail, or wait, because the mail server is slow or
+    // down; the user can ask for another link from `resend-verification`.
+    this.mailService.queue(user.email, subject, html, text);
   }
 
   /** Spends a grant and returns the user it belonged to. */

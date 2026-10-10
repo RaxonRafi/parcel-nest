@@ -22,7 +22,7 @@ export class RealtimeGateway implements OnGatewayInit {
   private readonly logger = new Logger(RealtimeGateway.name);
 
   @WebSocketServer()
-  server: Server;
+  server!: Server;
 
   constructor(
     private readonly tokenService: TokenService,

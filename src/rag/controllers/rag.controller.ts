@@ -53,7 +53,8 @@ export class RagController {
 
   @ApiOperation({
     summary: 'Upload a PDF and index it',
-    description: 'Admin only. PDF only, 10 MB maximum.',
+    description:
+      'Admin only. PDF only, 10 MB maximum. The file’s own first bytes are checked, not just the type the upload claims.',
   })
   @ApiConsumes('multipart/form-data')
   @ApiBody({ type: UploadPdfFormDto })
@@ -136,7 +137,7 @@ export class RagController {
   @ApiOperation({
     summary: 'Ask a question over the indexed documents',
     description:
-      'Any signed-in user. Each call bills an embedding and a completion, so it is not public. Policy documents are searchable by everyone; parcels only by an admin or by their sender, receiver or courier.',
+      'Any signed-in user. Each call bills an embedding and a completion, so it is not public. Policy documents are searchable by everyone; parcels only by an admin or by their sender, receiver or courier. Send `history` to ask a follow-up. When nothing relevant is found the answer is "I don’t have that information." with no sources, and no completion is billed.',
   })
   @ApiResponse({ status: 201, type: RagAnswerDto })
   @ApiResponse({ status: 400, description: 'Question is required' })
@@ -146,7 +147,12 @@ export class RagController {
   @UseGuards(JwtAuthGuard)
   @Post('ask')
   ask(@Body() body: AskDto, @CurrentUser() user: User): Promise<RagAnswer> {
-    return this.ragService.ask(body.question, user, body.filter ?? 'all');
+    return this.ragService.ask(
+      body.question,
+      user,
+      body.filter ?? 'all',
+      body.history ?? [],
+    );
   }
 
   @ApiBearerAuth(JWT_AUTH)
@@ -188,6 +194,7 @@ export class RagController {
         body.question,
         user,
         body.filter ?? 'all',
+        body.history ?? [],
       )) {
         // Stop pulling tokens from the model the moment nobody is listening —
         // every one of them costs money.

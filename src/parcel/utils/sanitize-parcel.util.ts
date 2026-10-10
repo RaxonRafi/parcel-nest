@@ -1,8 +1,9 @@
-import { User } from '../../user/entities/user.entity';
+import { stripPrivateUserFields } from '../../user/utils/sanitize-user.util';
 import { Parcel } from '../entities/parcel.entity';
 
 /**
- * Strips the password hash from every user hanging off a parcel.
+ * Strips the password hash and lockout state from every user hanging off a
+ * parcel.
  *
  * `sanitizeUser` covers the `/api/users` routes, but parcels carry users as
  * loaded relations — `sender`, `receiver`, `deliveryPersonnel` and each
@@ -14,12 +15,12 @@ import { Parcel } from '../entities/parcel.entity';
  * never to one that is about to be saved.
  */
 export function sanitizeParcel<T extends Parcel>(parcel: T): T {
-  stripPassword(parcel.sender);
-  stripPassword(parcel.receiver);
-  stripPassword(parcel.deliveryPersonnel);
+  stripPrivateUserFields(parcel.sender);
+  stripPrivateUserFields(parcel.receiver);
+  stripPrivateUserFields(parcel.deliveryPersonnel);
 
   for (const log of parcel.statusLogs ?? []) {
-    stripPassword(log.changedBy);
+    stripPrivateUserFields(log.changedBy);
   }
 
   return parcel;
@@ -27,10 +28,4 @@ export function sanitizeParcel<T extends Parcel>(parcel: T): T {
 
 export function sanitizeParcels<T extends Parcel>(parcels: T[]): T[] {
   return parcels.map(sanitizeParcel);
-}
-
-function stripPassword(user?: User | null): void {
-  if (user) {
-    delete (user as Partial<User>).password;
-  }
 }

@@ -27,6 +27,7 @@ import { Paginated } from '../../common/types/paginated.type';
 import { AssignDeliveryDto } from '../dto/assign-delivery.dto';
 import { DeliveryProofDto } from '../dto/delivery-proof.dto';
 import { QueryParcelsDto } from '../dto/query-parcels.dto';
+import { FeeBreakdownDto, QuoteParcelDto } from '../dto/quote-parcel.dto';
 import { CreateParcelDto } from '../dto/create-parcel.dto';
 import {
   PaginatedParcelsDto,
@@ -37,6 +38,7 @@ import { PublicParcelResponseDto } from '../dto/public-parcel-response.dto';
 import { UpdateParcelStatusDto } from '../dto/update-parcel-status.dto';
 import { Parcel } from '../entities/parcel.entity';
 import { PublicParcel } from '../types/parcel.types';
+import { FeeBreakdown } from '../utils/pricing.util';
 import { ParcelService } from '../services/parcel.service';
 
 /** Every route below takes the parcel's public `trackingId`, not its uuid. */
@@ -47,12 +49,28 @@ const TRACKING_ID = { name: 'trackingId', example: 'TRK-7K2M9QX4T1VB' };
 export class ParcelController {
   constructor(private readonly parcelService: ParcelService) {}
 
+  @ApiOperation({
+    summary: 'Price a parcel before booking it',
+    description:
+      'Public. Returns the fee and how it is made up for a weight and a cash-on-delivery amount, using the same calculation as booking. Nothing is stored.',
+  })
+  @ApiResponse({ status: 201, type: FeeBreakdownDto })
+  @Post('quote')
+  quote(@Body() payload: QuoteParcelDto): FeeBreakdown {
+    return this.parcelService.quote(payload);
+  }
+
   @ApiBearerAuth(JWT_AUTH)
   @ApiOperation({
     summary: 'Create a parcel',
-    description: 'Sender or admin. The receiver is resolved by id or by email.',
+    description:
+      'Sender or admin. The receiver is resolved by id or by email. The response carries `feeBreakdown`. With `REQUIRE_VERIFIED_EMAIL=true` on the server, an account that has not confirmed its email is refused with `403`.',
   })
   @ApiResponse({ status: 201, type: ParcelResponseDto })
+  @ApiResponse({
+    status: 403,
+    description: 'Email address not confirmed (only when the server requires it)',
+  })
   @UseGuards(JwtAuthGuard, RolesGuard)
   @Roles(Role.SENDER, Role.ADMIN)
   @Post()
@@ -74,7 +92,7 @@ export class ParcelController {
   @ApiResponse({
     status: 400,
     description:
-      'Parcel is blocked, the transition is not allowed, or DELIVERED was requested for a cash-on-delivery parcel whose cash is not recorded',
+      'Parcel is blocked, the transition is not allowed, PICKED_UP was requested with no courier assigned, or DELIVERED was requested for a cash-on-delivery parcel whose cash is not recorded',
   })
   @ApiResponse({
     status: 403,
@@ -96,7 +114,7 @@ export class ParcelController {
   @ApiOperation({
     summary: 'Cancel a parcel',
     description:
-      'Sender only, and only while the parcel is still PENDING. After pickup an admin cancels it through the status route.',
+      'The sender — or an admin, for a parcel they booked themselves — and only while it is still PENDING. After pickup, and for anyone else’s parcel, an admin cancels it through the status route.',
   })
   @ApiParam(TRACKING_ID)
   @ApiResponse({ status: 200, type: ParcelResponseDto })
@@ -105,7 +123,7 @@ export class ParcelController {
     description: 'Parcel is blocked or has already been picked up',
   })
   @UseGuards(JwtAuthGuard, RolesGuard)
-  @Roles(Role.SENDER)
+  @Roles(Role.SENDER, Role.ADMIN)
   @Patch(':trackingId/cancel')
   cancelParcel(
     @Param('trackingId') trackingId: string,
@@ -169,10 +187,14 @@ export class ParcelController {
   }
 
   @ApiBearerAuth(JWT_AUTH)
-  @ApiOperation({ summary: 'Parcels you sent', description: 'Sender only.' })
+  @ApiOperation({
+    summary: 'Parcels you sent',
+    description:
+      'Sender, or an admin for parcels they booked themselves. Like every list, rows carry no `statusLogs` — open one with the `details` route for its timeline.',
+  })
   @ApiResponse({ status: 200, type: PaginatedParcelsDto })
   @UseGuards(JwtAuthGuard, RolesGuard)
-  @Roles(Role.SENDER)
+  @Roles(Role.SENDER, Role.ADMIN)
   @Get('my-parcels')
   getMyParcels(
     @CurrentUser() user: User,
@@ -305,7 +327,7 @@ export class ParcelController {
   @ApiOperation({
     summary: 'Rebuild the assistant index from the database',
     description:
-      'Admin only. Re-indexes every parcel with its sender, receiver and courier, so the assistant can show each one to its own parties. Safe to repeat.',
+      'Admin only. Re-indexes every parcel with its sender, receiver and courier, so the assistant can show each one to its own parties, and drops vectors whose parcel no longer exists. Safe to repeat.',
   })
   @ApiResponse({ status: 201, type: ReindexResponseDto })
   @ApiResponse({ status: 503, description: 'Assistant is not configured' })
@@ -314,8 +336,12 @@ export class ParcelController {
   @Throttle({ ai: { limit: 20, ttl: 60_000 } })
   @Post('reindex')
   async reindexAll(): Promise<ReindexResponseDto> {
-    const { indexed } = await this.parcelService.reindexAll();
-    return { message: `${indexed} parcels re-indexed`, indexed };
+    const { indexed, removed } = await this.parcelService.reindexAll();
+    return {
+      message: `${indexed} parcels re-indexed${removed ? `, ${removed} stale removed` : ''}`,
+      indexed,
+      removed,
+    };
   }
 
   @ApiBearerAuth(JWT_AUTH)
@@ -341,10 +367,29 @@ export class ParcelController {
     return this.parcelService.submitDeliveryProof(trackingId, payload, user);
   }
 
+  @ApiBearerAuth(JWT_AUTH)
+  @ApiOperation({
+    summary: 'Open one parcel in full',
+    description:
+      'An admin, or the parcel’s sender, receiver or assigned courier. The full record: contact details, full addresses, proof of delivery, `feeBreakdown` and the `statusLogs` timeline with who made each change.',
+  })
+  @ApiParam(TRACKING_ID)
+  @ApiResponse({ status: 200, type: ParcelResponseDto })
+  @ApiResponse({ status: 403, description: 'Not a party to this parcel' })
+  @ApiResponse({ status: 404, description: 'No parcel with that tracking id' })
+  @UseGuards(JwtAuthGuard)
+  @Get(':trackingId/details')
+  getParcelDetails(
+    @Param('trackingId') trackingId: string,
+    @CurrentUser() user: User,
+  ): Promise<Parcel> {
+    return this.parcelService.getDetails(trackingId, user);
+  }
+
   @ApiOperation({
     summary: 'Track a parcel',
     description:
-      'Public — no authentication required, so the response is trimmed: status, route and timeline only, with no sender, receiver or courier records attached.',
+      'Public — no authentication required, so the response is trimmed and masked: status and timeline, the pickup and delivery *area* rather than the street address, and names as first name plus initial. No sender, receiver or courier records are attached.',
   })
   @ApiParam(TRACKING_ID)
   @ApiResponse({ status: 200, type: PublicParcelResponseDto })

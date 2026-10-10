@@ -1,6 +1,12 @@
 import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { createTransport, Transporter } from 'nodemailer';
+import { BackgroundService } from '../../common/background/background.service';
+
+export interface MailOptions {
+  /** Where a reply should go when it is not the sending address. */
+  replyTo?: string;
+}
 
 /**
  * SMTP delivery. Configuration is optional on purpose: without SMTP_HOST the
@@ -12,7 +18,10 @@ export class MailService implements OnModuleInit {
   private readonly logger = new Logger(MailService.name);
   private transporter: Transporter | null = null;
 
-  constructor(private readonly config: ConfigService) {}
+  constructor(
+    private readonly config: ConfigService,
+    private readonly background: BackgroundService,
+  ) {}
 
   onModuleInit(): void {
     const host = this.config.get<string>('SMTP_HOST');
@@ -45,11 +54,32 @@ export class MailService implements OnModuleInit {
     return this.transporter !== null;
   }
 
+  /**
+   * Sends without making the caller wait, and without ever failing them.
+   *
+   * This is what every caller in the API wants: an SMTP round trip is the
+   * slowest thing a request does, and a mail outage must not undo — or even
+   * report as failing — the write that triggered the message. The failure is
+   * logged under the subject and recipient instead.
+   */
+  queue(
+    to: string,
+    subject: string,
+    html: string,
+    text: string,
+    options?: MailOptions,
+  ): void {
+    this.background.run(`Email "${subject}" to ${to}`, () =>
+      this.send(to, subject, html, text, options),
+    );
+  }
+
   async send(
     to: string,
     subject: string,
     html: string,
     text: string,
+    options: MailOptions = {},
   ): Promise<void> {
     const from = this.config.get<string>('SMTP_FROM') ?? 'no-reply@parcel.app';
 
@@ -61,7 +91,14 @@ export class MailService implements OnModuleInit {
       return;
     }
 
-    await this.transporter.sendMail({ from, to, subject, html, text });
+    await this.transporter.sendMail({
+      from,
+      to,
+      subject,
+      html,
+      text,
+      ...(options.replyTo ? { replyTo: options.replyTo } : {}),
+    });
     this.logger.log(`Sent "${subject}" to ${to}`);
   }
 }

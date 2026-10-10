@@ -12,22 +12,23 @@ import { User } from '../../user/entities/user.entity';
 import { ParcelStatusLog } from './parcel-status-log.entity';
 import { numericTransformer } from '../../common/utils/numeric.transformer';
 import { ParcelStatus } from '../types/parcel.types';
+import { FeeBreakdown } from '../utils/pricing.util';
 
 @Entity('parcels')
 export class Parcel {
   @PrimaryGeneratedColumn('uuid')
-  id: string;
+  id!: string;
 
   @Column({ unique: true })
-  trackingId: string;
+  trackingId!: string;
 
   @ManyToOne(() => User)
   @JoinColumn({ name: 'senderId' })
-  sender: User;
+  sender!: User;
 
   @ManyToOne(() => User)
   @JoinColumn({ name: 'receiverId' })
-  receiver: User;
+  receiver!: User;
 
   /**
    * The approved courier carrying this parcel. Null until an admin assigns
@@ -35,34 +36,34 @@ export class Parcel {
    */
   @ManyToOne(() => User, { nullable: true, onDelete: 'SET NULL' })
   @JoinColumn({ name: 'deliveryPersonnelId' })
-  deliveryPersonnel: User | null;
+  deliveryPersonnel!: User | null;
 
   @Column()
-  senderName: string;
+  senderName!: string;
 
   @Column()
-  receiverName: string;
+  receiverName!: string;
 
   @Column({ nullable: true })
-  senderPhone: string;
+  senderPhone!: string;
 
   @Column({ nullable: true })
-  receiverPhone: string;
+  receiverPhone!: string;
 
   @Column({ type: 'text' })
-  pickupAddress: string;
+  pickupAddress!: string;
 
   @Column({ type: 'text' })
-  deliveryAddress: string;
+  deliveryAddress!: string;
 
   @Column({ type: 'text', nullable: true })
-  description: string;
+  description!: string;
 
   @Column({ type: 'varchar', length: 32, default: ParcelStatus.PENDING })
-  status: ParcelStatus;
+  status!: ParcelStatus;
 
   @Column({ default: false })
-  isBlocked: boolean;
+  isBlocked!: boolean;
 
   // ── Pricing ───────────────────────────────────────────────────────────────
   // `numeric` comes back from pg as a string; the transformer keeps the entity
@@ -75,7 +76,7 @@ export class Parcel {
     default: 1,
     transformer: numericTransformer,
   })
-  weightKg: number;
+  weightKg!: number;
 
   /** Computed server-side from weight — never taken from the request. */
   @Column({
@@ -85,7 +86,15 @@ export class Parcel {
     default: 0,
     transformer: numericTransformer,
   })
-  deliveryFee: number;
+  deliveryFee!: number;
+
+  /**
+   * How `deliveryFee` was arrived at, frozen at booking. Stored rather than
+   * recomputed because the rates are configuration and can change afterwards.
+   * Null on parcels booked before this column existed.
+   */
+  @Column({ type: 'jsonb', nullable: true })
+  feeBreakdown!: FeeBreakdown | null;
 
   /** Cash to collect from the receiver on handover. 0 means prepaid. */
   @Column({
@@ -95,32 +104,32 @@ export class Parcel {
     default: 0,
     transformer: numericTransformer,
   })
-  codAmount: number;
+  codAmount!: number;
 
   @Column({ default: false })
-  isCodCollected: boolean;
+  isCodCollected!: boolean;
 
   // ── Proof of delivery ─────────────────────────────────────────────────────
 
   @Column({ type: 'simple-array', default: '' })
-  deliveryProofImages: string[];
+  deliveryProofImages!: string[];
 
   @Column({ type: 'text', nullable: true })
-  deliveryProofNote: string | null;
+  deliveryProofNote!: string | null;
 
   /** Who actually took the parcel — often not the named receiver. */
   @Column({ type: 'varchar', length: 120, nullable: true })
-  receivedBy: string | null;
+  receivedBy!: string | null;
 
   @Column({ type: 'timestamptz', nullable: true })
-  deliveredAt: Date | null;
+  deliveredAt!: Date | null;
 
   @OneToMany(() => ParcelStatusLog, (log) => log.parcel, { cascade: true })
-  statusLogs: ParcelStatusLog[];
+  statusLogs!: ParcelStatusLog[];
 
   @CreateDateColumn({ type: 'timestamptz' })
-  createdAt: Date;
+  createdAt!: Date;
 
   @UpdateDateColumn({ type: 'timestamptz' })
-  updatedAt: Date;
+  updatedAt!: Date;
 }

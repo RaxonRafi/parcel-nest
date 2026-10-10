@@ -1,5 +1,6 @@
-import { readFile } from 'fs/promises';
+import { open, readFile } from 'fs/promises';
 import {
+  BadRequestException,
   Injectable,
   Logger,
   OnModuleInit,
@@ -28,6 +29,7 @@ import {
   RagFilter,
   RagSource,
   RagStreamChunk,
+  RagTurn,
   RagViewer,
 } from '../types/rag.types';
 
@@ -55,6 +57,36 @@ const REQUIRED_KEYS = [
 
 /** Every chunk of one PDF shares this id prefix. */
 const pdfChunkPrefix = (source: string): string => `pdf-${source}-chunk-`;
+
+/** Every parcel vector's id is this plus the parcel's uuid. */
+const PARCEL_PREFIX = 'parcel-';
+
+/**
+ * What the assistant says when retrieval finds nothing. The same sentence the
+ * prompt tells the model to use, so the client sees one wording either way.
+ */
+export const NO_INFORMATION = "I don't have that information.";
+
+/** Every PDF starts with these bytes, whatever the upload claimed to be. */
+const PDF_MAGIC = '%PDF-';
+
+/**
+ * A follow-up like "and when will it arrive?" names nothing to search for.
+ * Retrieval is given the previous question as well, so the vector query still
+ * points at the parcel or policy the conversation is about.
+ */
+export function retrievalQuery(question: string, history: RagTurn[]): string {
+  const previous = [...history].reverse().find((turn) => turn.role === 'user');
+  return previous ? `${previous.content}\n${question}` : question;
+}
+
+function formatHistory(history: RagTurn[]): string {
+  if (history.length === 0) return '(none)';
+
+  return history
+    .map((turn) => `${turn.role === 'user' ? 'User' : 'Assistant'}: ${turn.content}`)
+    .join('\n');
+}
 
 type MetadataFilter = Record<string, unknown>;
 
@@ -180,6 +212,7 @@ export class RagService implements OnModuleInit {
     metadata: PdfMetadata,
   ): Promise<PdfIngestResult> {
     const store = this.store();
+    await this.assertIsPdf(filePath);
     const rawDocs = await this.loadPdfPages(filePath);
 
     const splitter = new RecursiveCharacterTextSplitter({
@@ -210,6 +243,29 @@ export class RagService implements OnModuleInit {
       `📄 Ingested "${metadata.source}" → ${chunks.length} chunks`,
     );
     return { chunksIndexed: chunks.length };
+  }
+
+  /**
+   * The upload filter only sees the MIME type the client claimed, which is
+   * whatever the client chose to send. The first bytes of the file are not.
+   */
+  private async assertIsPdf(filePath: string): Promise<void> {
+    const handle = await open(filePath, 'r');
+
+    try {
+      const { buffer, bytesRead } = await handle.read(
+        Buffer.alloc(PDF_MAGIC.length),
+        0,
+        PDF_MAGIC.length,
+        0,
+      );
+
+      if (buffer.toString('latin1', 0, bytesRead) !== PDF_MAGIC) {
+        throw new BadRequestException('That file is not a PDF');
+      }
+    } finally {
+      await handle.close();
+    }
   }
 
   /**
@@ -301,7 +357,7 @@ export class RagService implements OnModuleInit {
 
     await this.vectorStore.addDocuments(
       parcels.map((parcel) => this.toParcelVector(parcel)),
-      { ids: parcels.map((parcel) => `parcel-${parcel.id}`) },
+      { ids: parcels.map((parcel) => `${PARCEL_PREFIX}${parcel.id}`) },
     );
 
     this.logger.log(
@@ -340,7 +396,51 @@ export class RagService implements OnModuleInit {
   }
 
   async deleteParcel(parcelId: string): Promise<void> {
-    await this.store().delete({ ids: [`parcel-${parcelId}`] });
+    await this.store().delete({ ids: [`${PARCEL_PREFIX}${parcelId}`] });
+  }
+
+  /**
+   * Drops every parcel vector whose parcel is not in `keep` — what a full
+   * rebuild uses to clear out parcels that no longer exist. Returns how many
+   * were removed.
+   *
+   * Listing ids by prefix is a serverless-index feature. On a pod-based index
+   * it is unavailable, and there the stale vectors are left in place rather
+   * than failing a rebuild that has otherwise succeeded.
+   */
+  async pruneParcelsExcept(keep: ReadonlySet<string>): Promise<number> {
+    const index = this.pineconeIndex;
+    if (!index) return 0;
+
+    try {
+      let removed = 0;
+      let paginationToken: string | undefined;
+
+      do {
+        const page = await index.listPaginated({
+          prefix: PARCEL_PREFIX,
+          paginationToken,
+        });
+        const stale = (page.vectors ?? [])
+          .map((vector) => vector.id)
+          .filter(
+            (id): id is string =>
+              !!id && !keep.has(id.slice(PARCEL_PREFIX.length)),
+          );
+
+        if (stale.length) {
+          await index.deleteMany(stale);
+          removed += stale.length;
+        }
+        paginationToken = page.pagination?.next;
+      } while (paginationToken);
+
+      return removed;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Unknown error';
+      this.logger.warn(`Could not prune stale parcel vectors: ${message}`);
+      return 0;
+    }
   }
 
   // ─── Ask ──────────────────────────────────────────────────────────────────
@@ -356,23 +456,22 @@ export class RagService implements OnModuleInit {
     question: string,
     viewer: RagViewer,
     filter: RagFilter = 'all',
+    history: RagTurn[] = [],
   ): AsyncGenerator<RagStreamChunk> {
-    const sourceDocs = await this.retrieve(question, viewer, filter);
+    const sourceDocs = await this.retrieve(question, viewer, filter, history);
 
     yield {
       type: 'sources',
       sources: sourceDocs.map((d) => this.toSource(d)),
     };
 
-    const chain = RunnableSequence.from([
-      {
-        context: () => sourceDocs.map((d) => d.pageContent).join('\n\n'),
-        question: new RunnablePassthrough(),
-      },
-      this.answerPrompt(),
-      this.llm,
-      new StringOutputParser(),
-    ]);
+    if (this.hasNothingToAnswerFrom(question, sourceDocs)) {
+      yield { type: 'token', token: NO_INFORMATION };
+      yield { type: 'done' };
+      return;
+    }
+
+    const chain = this.answerChain(sourceDocs, history);
 
     try {
       for await (const token of await chain.stream(question)) {
@@ -395,23 +494,42 @@ export class RagService implements OnModuleInit {
     question: string,
     viewer: RagViewer,
     filter: RagFilter = 'all',
+    history: RagTurn[] = [],
   ): Promise<RagAnswer> {
     // Retrieved once and shared with the chain, as in `askStream`.
-    const sourceDocs = await this.retrieve(question, viewer, filter);
+    const sourceDocs = await this.retrieve(question, viewer, filter, history);
 
-    const chain = RunnableSequence.from([
+    if (this.hasNothingToAnswerFrom(question, sourceDocs)) {
+      return { answer: NO_INFORMATION, sources: [] };
+    }
+
+    const answer = await this.answerChain(sourceDocs, history).invoke(question);
+
+    return { answer, sources: sourceDocs.map((d) => this.toSource(d)) };
+  }
+
+  /**
+   * A real question that retrieved nothing has only one honest answer, and
+   * the prompt already tells the model to give it. Saying it here skips a
+   * completion that costs money to produce the same sentence — or, worse, to
+   * produce something invented. Small talk also retrieves nothing, but it is
+   * meant to reach the model.
+   */
+  private hasNothingToAnswerFrom(question: string, docs: Document[]): boolean {
+    return docs.length === 0 && !isSmallTalk(question);
+  }
+
+  private answerChain(sourceDocs: Document[], history: RagTurn[]) {
+    return RunnableSequence.from([
       {
         context: () => sourceDocs.map((d) => d.pageContent).join('\n\n'),
+        history: () => formatHistory(history),
         question: new RunnablePassthrough(),
       },
       this.answerPrompt(),
       this.llm,
       new StringOutputParser(),
     ]);
-
-    const answer = await chain.invoke(question);
-
-    return { answer, sources: sourceDocs.map((d) => this.toSource(d)) };
   }
 
   /** Nothing is looked up for small talk, so it cites nothing either. */
@@ -419,6 +537,7 @@ export class RagService implements OnModuleInit {
     question: string,
     viewer: RagViewer,
     filter: RagFilter,
+    history: RagTurn[] = [],
   ): Promise<Document[]> {
     const store = this.store();
     if (isSmallTalk(question)) return [];
@@ -429,7 +548,7 @@ export class RagService implements OnModuleInit {
       ? store.asRetriever({ k: 5, filter: scope })
       : store.asRetriever({ k: 5 });
 
-    return retriever.invoke(question);
+    return retriever.invoke(retrievalQuery(question, history));
   }
 
   private answerPrompt(): ChatPromptTemplate {
@@ -442,9 +561,15 @@ export class RagService implements OnModuleInit {
 
       Otherwise, answer the question based only on the context below.
       If the context does not contain the answer, say
-      "I don't have that information."
+      "${NO_INFORMATION}"
+
+      The conversation so far is only there to tell you what "it", "that
+      parcel" and the like refer to. Never treat it as a source of facts.
 
       Context: {context}
+
+      Conversation so far:
+      {history}
 
       Message: {question}
     `);
