@@ -16,12 +16,14 @@ const BASELINE = { ttl: 60_000, limit: 120 };
  * a substitute for an edge rate limit. Point the module at a shared store
  * (Redis) if that guarantee starts to matter.
  */
+export const THROTTLER_NAMES = [
+  'default',
+  // Credential endpoints: tightened per handler to 8 a minute.
+  'auth',
+  // Every call bills an embedding plus a completion: 20 a minute per handler.
+  'ai',
+] as const;
+
 export const THROTTLER_CONFIG: ThrottlerModuleOptions = {
-  throttlers: [
-    { name: 'default', ...BASELINE },
-    // Credential endpoints: tightened per handler to 8 a minute.
-    { name: 'auth', ...BASELINE },
-    // Every call bills an embedding plus a completion: 20 a minute per handler.
-    { name: 'ai', ...BASELINE },
-  ],
+  throttlers: THROTTLER_NAMES.map((name) => ({ name, ...BASELINE })),
 };

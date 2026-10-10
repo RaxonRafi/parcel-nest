@@ -5,6 +5,7 @@ import { IoAdapter } from '@nestjs/platform-socket.io';
 import type { Request, RequestHandler, Response } from 'express';
 import { ServerOptions } from 'socket.io';
 import { AppModule } from './app.module';
+import { THROTTLER_NAMES } from './common/throttler.config';
 import { configureApp } from './config/app.config';
 import { setupSwagger } from './config/swagger.config';
 import { UserService } from './user/services/user.service';
@@ -16,6 +17,16 @@ const DEFAULT_ORIGINS = [
   'http://127.0.0.1:3001',
   'https://percel-client-next.vercel.app',
 ];
+
+/**
+ * A browser hides every response header from cross-origin script unless it is
+ * listed here, so without this the client gets the 429 but not how long to
+ * wait. The throttler suffixes the header with the name of the limit that was
+ * hit, except for `default`.
+ */
+const RATE_LIMIT_HEADERS = THROTTLER_NAMES.map((name) =>
+  name === 'default' ? 'Retry-After' : `Retry-After-${name}`,
+);
 
 /** Memoised so concurrent cold-start requests share one boot. */
 let appPromise: Promise<INestApplication> | undefined;
@@ -75,7 +86,11 @@ async function createApp(): Promise<INestApplication> {
 
   configureApp(app);
   const origins = corsOrigins();
-  app.enableCors({ origin: origins, credentials: true });
+  app.enableCors({
+    origin: origins,
+    credentials: true,
+    exposedHeaders: RATE_LIMIT_HEADERS,
+  });
   app.useWebSocketAdapter(new CorsIoAdapter(app, origins));
   setupSwagger(app);
 

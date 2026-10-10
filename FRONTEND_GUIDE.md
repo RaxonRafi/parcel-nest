@@ -257,8 +257,11 @@ const needsProof = parcel.codAmount > 0 && !parcel.isCodCollected;
 For the receiver, hide or disable "Confirm delivery" under the same condition
 and explain that the courier records the handover.
 
-`deliveredAt` is now reliable on every delivered parcel, so it can be shown
-directly instead of falling back to `updatedAt`.
+`deliveredAt` is now set on every parcel delivered from here on. Parcels
+delivered earlier through the status or confirm routes are filled in by the
+`BackfillDeliveredAt` migration (see
+[10](#10-backend-steps-before-the-client-ships)); once that has run, any
+`deliveredAt ?? updatedAt` fallback in the client can go.
 
 Submitting proof for a parcel that is already delivered still works: it
 attaches the images and keeps the original `deliveredAt`.
@@ -338,8 +341,8 @@ numbers:
   `sampleSize` lower. Assigning, unassigning or blocking used to cut a status
   span short; a span now runs from entering a status to leaving it.
 - `daily[].delivered` and `averageFulfilmentHours` now include deliveries made
-  through the status route and receiver confirmation. Deliveries recorded that
-  way before this release still have no `deliveredAt`.
+  through the status route and receiver confirmation. Older deliveries made
+  that way appear once the `BackfillDeliveredAt` migration has run.
 
 ### Users list
 
@@ -467,8 +470,9 @@ real limits are now, per route and per client address:
 
 `429` responses say how long to wait, in seconds: `Retry-After` for the
 general limit, `Retry-After-auth` for credential routes and `Retry-After-ai`
-for the assistant. Debounce search inputs as good practice, but ordinary
-browsing no longer needs special care.
+for the assistant. The API lists all three in `Access-Control-Expose-Headers`,
+so a browser client on another origin can read them. Debounce search inputs as
+good practice, but ordinary browsing no longer needs special care.
 
 ---
 
@@ -477,12 +481,15 @@ browsing no longer needs special care.
 These are on the API side, listed here because the client's behaviour depends
 on them.
 
-1. **Run the migration.**
-   `npm run migration:run` applies
-   `1787875900000-TimestamptzAndParcelPartyIndexes`: the original
-   `createdAt`/`updatedAt` columns become `timestamptz` and two indexes are
-   added. It rewrites the `users`, `parcels` and `parcel_status_logs` tables,
-   so run it in a quiet moment.
+1. **Run the migrations.** `npm run migration:run` applies two:
+
+   - `1787875900000-TimestamptzAndParcelPartyIndexes`: the original
+     `createdAt`/`updatedAt` columns become `timestamptz` and two indexes are
+     added. It rewrites the `users`, `parcels` and `parcel_status_logs`
+     tables, so run it in a quiet moment.
+   - `1787876000000-BackfillDeliveredAt`: gives every already-delivered parcel
+     that has no `deliveredAt` the time of its first `DELIVERED` status-log
+     entry.
 
    Effect on the client: timestamps on users, parcels and status logs were
    being read in the server's local time zone. They now come back as true UTC
