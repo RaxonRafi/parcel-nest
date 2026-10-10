@@ -70,8 +70,9 @@ State after the fixes: `npm run lint` clean, `npx tsc --noEmit` clean,
 
 ### Still open
 
-- **Run and verify the migration.** `1787875900000-TimestamptzAndParcelPartyIndexes`
-  has not been applied to any database. Try it on a copy first.
+- **Run and verify the migrations.** `1787875900000-TimestamptzAndParcelPartyIndexes`
+  and `1787876000000-BackfillDeliveredAt` have not been applied to any database.
+  Try them on a copy first.
 - **Not exercised against live services:** the `dashboard/trends` SQL (pg-mem
   cannot run it), and the Pinecone paths — per-user filtering, PDF re-upload
   and delete.
