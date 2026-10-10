@@ -8,6 +8,7 @@ import { TokenModule } from '../token/token.module';
 import { UserController } from './controllers/user.controller';
 import { AuthProvider } from './entities/auth-provider.entity';
 import { User } from './entities/user.entity';
+import { UserEventsService } from './services/user-events.service';
 import { UserService } from './services/user.service';
 
 /**
@@ -22,7 +23,7 @@ import { UserService } from './services/user.service';
     AuditRecorderModule,
   ],
   controllers: [UserController],
-  providers: [UserService, JwtAuthGuard, RolesGuard],
-  exports: [UserService],
+  providers: [UserService, UserEventsService, JwtAuthGuard, RolesGuard],
+  exports: [UserService, UserEventsService],
 })
 export class UserModule {}

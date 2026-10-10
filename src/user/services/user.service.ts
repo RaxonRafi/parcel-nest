@@ -1,6 +1,7 @@
 import {
   BadRequestException,
   ConflictException,
+  ForbiddenException,
   Injectable,
   Logger,
   NotFoundException,
@@ -14,6 +15,7 @@ import { Paginated, paginate } from '../../common/types/paginated.type';
 import { AuditService } from '../../audit/services/audit.service';
 import { AuditAction, AuditTargetType } from '../../audit/types/audit.types';
 import { EmailVerificationService } from '../../auth/services/email-verification.service';
+import { SessionService } from '../../auth/services/session.service';
 import { PaginationQueryDto } from '../../common/dto/pagination-query.dto';
 import { QueryUsersDto } from '../dto/query-users.dto';
 import { extractBearerToken } from '../../common/utils/jwt.util';
@@ -31,6 +33,7 @@ import {
   UserStats,
 } from '../types/user.types';
 import { sanitizeUser } from '../utils/sanitize-user.util';
+import { UserEventsService } from './user-events.service';
 
 /**
  * Sole owner of the `users` / `auth_providers` tables. Every other module goes
@@ -46,7 +49,9 @@ export class UserService {
     private readonly configService: ConfigService,
     private readonly tokenService: TokenService,
     private readonly emailVerificationService: EmailVerificationService,
+    private readonly sessionService: SessionService,
     private readonly auditService: AuditService,
+    private readonly userEvents: UserEventsService,
   ) {}
 
   // ─── Bootstrapping ────────────────────────────────────────────────────────
@@ -98,12 +103,18 @@ export class UserService {
     payload: CreateUserDto,
     authorization?: string,
   ): Promise<AuthResponse> {
-    const registerPayload: CreateUserDto = {
-      ...payload,
-      role: authorization ? payload.role : Role.SENDER,
-    };
-    const user = await this.createUser(registerPayload, authorization);
+    // The requested role is honoured as sent. `createUser` is what guards
+    // it: ADMIN needs an admin's token, and DELIVERY_PERSONNEL is parked in
+    // PENDING_DELIVERY until an admin approves the application.
+    const user = await this.createUser(payload, authorization);
     const tokens = this.tokenService.createUserTokens(user);
+    // Without a recorded session the refresh token is rejected the first
+    // time it is used, signing the new user out when the access token expires.
+    await this.sessionService.record(
+      user,
+      tokens.refreshToken,
+      this.tokenService.refreshTokenExpiresAt(),
+    );
     return { user: sanitizeUser(user), ...tokens };
   }
 
@@ -163,11 +174,12 @@ export class UserService {
     payload: CreateReceiverDto,
   ): Promise<{ user: User; created: boolean }> {
     const email = payload.email.toLowerCase().trim();
-    const existing = await this.userRepository.findOne({
-      where: { email, isDeleted: false },
-    });
+    // Looked up regardless of `isDeleted`: the email column is unique, so a
+    // deleted account still owns the address and inserting over it would fail.
+    const existing = await this.userRepository.findOne({ where: { email } });
 
     if (existing) {
+      this.assertCanReceive(existing);
       return { user: existing, created: false };
     }
 
@@ -201,6 +213,15 @@ export class UserService {
     }
 
     return user;
+  }
+
+  /** A parcel cannot be addressed to an account that can no longer sign in. */
+  assertCanReceive(user: User): void {
+    if (this.getSignInBlockReason(user)) {
+      throw new BadRequestException(
+        'That receiver account is not available — use a different receiver',
+      );
+    }
   }
 
   async getUserById(id: string): Promise<SafeUser> {
@@ -316,9 +337,21 @@ export class UserService {
     actor?: User,
   ): Promise<SafeUser> {
     const user = await this.findEntityByIdOrFail(userId);
+
+    if (!active) {
+      this.assertMayBeBlocked(user, actor);
+    }
+
     const from = user.isActive;
     user.isActive = active ? IsActive.ACTIVE : IsActive.BLOCKED;
     const saved = await this.userRepository.save(user);
+
+    if (!active) {
+      // The guard already refuses a blocked user's access token; this ends
+      // the refresh tokens and open sockets that would otherwise linger.
+      await this.sessionService.revokeAllForUser(user.id);
+      this.userEvents.announceAccessRevoked(user.id);
+    }
 
     if (actor) {
       await this.auditService.record({
@@ -457,6 +490,25 @@ export class UserService {
     });
 
     return paginate(users.map(sanitizeUser), total, query.page, query.limit);
+  }
+
+  /**
+   * An admin locking themselves out, or locking out the seeded super admin,
+   * can leave the system with nobody able to undo it.
+   */
+  private assertMayBeBlocked(target: User, actor?: User): void {
+    if (actor && actor.id === target.id) {
+      throw new ForbiddenException('You cannot block your own account');
+    }
+
+    const superAdminEmail = this.configService
+      .get<string>('SUPER_ADMIN_EMAIL')
+      ?.toLowerCase()
+      .trim();
+
+    if (superAdminEmail && target.email === superAdminEmail) {
+      throw new ForbiddenException('The super admin cannot be blocked');
+    }
   }
 
   private async hashPassword(plainPassword: string): Promise<string> {

@@ -40,7 +40,9 @@ export function setupSwagger(app: INestApplication): void {
     .addTag('Users', 'Registration, profile and admin user management')
     .addTag('Parcels', 'Create, track and move parcels through their lifecycle')
     .addTag('Dashboard', 'Admin-only aggregate statistics')
+    .addTag('Audit', 'Admin-only trail of privileged actions')
     .addTag('RAG', 'Document ingestion and question answering')
+    .addTag('Contact', 'Public contact form')
     .addTag('System', 'Health and scheduled keep-alive')
     .build();
 

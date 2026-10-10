@@ -118,9 +118,9 @@ export class Parcel {
   @OneToMany(() => ParcelStatusLog, (log) => log.parcel, { cascade: true })
   statusLogs: ParcelStatusLog[];
 
-  @CreateDateColumn()
+  @CreateDateColumn({ type: 'timestamptz' })
   createdAt: Date;
 
-  @UpdateDateColumn()
+  @UpdateDateColumn({ type: 'timestamptz' })
   updatedAt: Date;
 }

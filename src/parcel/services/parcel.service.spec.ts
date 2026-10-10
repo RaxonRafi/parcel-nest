@@ -24,6 +24,7 @@ describe('ParcelService — delivery personnel', () => {
     findOne: jest.Mock;
     save: jest.Mock;
     find: jest.Mock;
+    manager: { transaction: jest.Mock };
   };
   let statusLogRepository: { create: jest.Mock; save: jest.Mock };
   let userService: { findDeliveryPersonnelOrFail: jest.Mock };
@@ -52,7 +53,22 @@ describe('ParcelService — delivery personnel', () => {
     }) as Parcel;
 
   beforeEach(async () => {
-    parcelRepository = { findOne: jest.fn(), save: jest.fn(), find: jest.fn() };
+    // `persist` writes the parcel and its log row through one transaction;
+    // run the callback inline against a stub manager.
+    const manager = {
+      save: jest.fn(),
+      create: jest.fn((_entity: unknown, value: unknown) => value),
+    };
+    parcelRepository = {
+      findOne: jest.fn(),
+      save: jest.fn(),
+      find: jest.fn(),
+      manager: {
+        transaction: jest.fn((run: (m: typeof manager) => Promise<void>) =>
+          run(manager),
+        ),
+      },
+    };
     statusLogRepository = { create: jest.fn((v) => v), save: jest.fn() };
     userService = { findDeliveryPersonnelOrFail: jest.fn() };
 
@@ -254,6 +270,178 @@ describe('ParcelService — delivery personnel', () => {
       await expect(
         service.unassignDeliveryPersonnel('TRK-TEST', admin),
       ).rejects.toBeInstanceOf(BadRequestException);
+    });
+  });
+
+  describe('reaching DELIVERED', () => {
+    const receiver = { id: 'receiver-1', role: Role.RECEIVER } as User;
+
+    it('stamps deliveredAt from a status update', async () => {
+      const parcel = buildParcel({ codAmount: 0 });
+      parcelRepository.findOne.mockResolvedValue(parcel);
+
+      await service.updateStatus(
+        'TRK-TEST',
+        { status: ParcelStatus.DELIVERED },
+        admin,
+      );
+
+      expect(parcel.deliveredAt).toBeInstanceOf(Date);
+    });
+
+    it('stamps deliveredAt from a receiver confirmation', async () => {
+      const parcel = buildParcel({ codAmount: 0, receiver });
+      parcelRepository.findOne.mockResolvedValue(parcel);
+
+      await service.confirmDelivery('TRK-TEST', receiver);
+
+      expect(parcel.status).toBe(ParcelStatus.DELIVERED);
+      expect(parcel.deliveredAt).toBeInstanceOf(Date);
+    });
+
+    it('refuses a status update while cash is uncollected', async () => {
+      parcelRepository.findOne.mockResolvedValue(
+        buildParcel({ codAmount: 500, isCodCollected: false }),
+      );
+
+      await expect(
+        service.updateStatus(
+          'TRK-TEST',
+          { status: ParcelStatus.DELIVERED },
+          admin,
+        ),
+      ).rejects.toThrow(/cash on delivery/);
+    });
+
+    it('refuses a receiver confirmation while cash is uncollected', async () => {
+      parcelRepository.findOne.mockResolvedValue(
+        buildParcel({ codAmount: 500, isCodCollected: false, receiver }),
+      );
+
+      await expect(
+        service.confirmDelivery('TRK-TEST', receiver),
+      ).rejects.toThrow(/cash on delivery/);
+    });
+
+    it('accepts proof that records the cash', async () => {
+      const parcel = buildParcel({
+        codAmount: 500,
+        isCodCollected: false,
+        deliveryPersonnel: courier,
+        receiverName: 'Jane',
+      });
+      parcelRepository.findOne.mockResolvedValue(parcel);
+
+      await service.submitDeliveryProof(
+        'TRK-TEST',
+        { images: ['https://cdn.example.com/a.jpg'], codCollected: true },
+        courier,
+      );
+
+      expect(parcel.status).toBe(ParcelStatus.DELIVERED);
+      expect(parcel.isCodCollected).toBe(true);
+      expect(parcel.deliveredAt).toBeInstanceOf(Date);
+    });
+
+    it('keeps the original delivery time when proof arrives later', async () => {
+      const deliveredAt = new Date('2026-01-01T00:00:00Z');
+      const parcel = buildParcel({
+        status: ParcelStatus.DELIVERED,
+        codAmount: 0,
+        deliveredAt,
+      });
+      parcelRepository.findOne.mockResolvedValue(parcel);
+
+      await service.submitDeliveryProof(
+        'TRK-TEST',
+        { images: ['https://cdn.example.com/a.jpg'] },
+        admin,
+      );
+
+      expect(parcel.deliveredAt).toBe(deliveredAt);
+    });
+  });
+
+  describe('blocked parcels', () => {
+    const sender = { id: 'sender-1', role: Role.SENDER } as User;
+    const receiver = { id: 'receiver-1', role: Role.RECEIVER } as User;
+
+    it('cannot be cancelled', async () => {
+      parcelRepository.findOne.mockResolvedValue(
+        buildParcel({ isBlocked: true, status: ParcelStatus.PENDING, sender }),
+      );
+
+      await expect(service.cancelParcel('TRK-TEST', sender)).rejects.toThrow(
+        'Parcel is blocked',
+      );
+    });
+
+    it('cannot be confirmed', async () => {
+      parcelRepository.findOne.mockResolvedValue(
+        buildParcel({ isBlocked: true, receiver }),
+      );
+
+      await expect(
+        service.confirmDelivery('TRK-TEST', receiver),
+      ).rejects.toThrow('Parcel is blocked');
+    });
+
+    it('cannot have proof submitted', async () => {
+      parcelRepository.findOne.mockResolvedValue(
+        buildParcel({ isBlocked: true }),
+      );
+
+      await expect(
+        service.submitDeliveryProof(
+          'TRK-TEST',
+          { images: ['https://cdn.example.com/a.jpg'] },
+          admin,
+        ),
+      ).rejects.toThrow('Parcel is blocked');
+    });
+
+    it('can be unblocked, and then moves again', async () => {
+      const parcel = buildParcel({ isBlocked: true });
+      parcelRepository.findOne.mockResolvedValue(parcel);
+
+      await service.unblockParcel('TRK-TEST', admin);
+
+      expect(parcel.isBlocked).toBe(false);
+    });
+
+    it('refuses to unblock a parcel that is not blocked', async () => {
+      parcelRepository.findOne.mockResolvedValue(buildParcel());
+
+      await expect(
+        service.unblockParcel('TRK-TEST', admin),
+      ).rejects.toBeInstanceOf(BadRequestException);
+    });
+  });
+
+  describe('cancelParcel', () => {
+    const sender = { id: 'sender-1', role: Role.SENDER } as User;
+
+    it('lets the sender cancel while PENDING', async () => {
+      const parcel = buildParcel({ status: ParcelStatus.PENDING, sender });
+      parcelRepository.findOne.mockResolvedValue(parcel);
+
+      await service.cancelParcel('TRK-TEST', sender);
+
+      expect(parcel.status).toBe(ParcelStatus.CANCELLED);
+    });
+
+    it.each([
+      ParcelStatus.PICKED_UP,
+      ParcelStatus.IN_TRANSIT,
+      ParcelStatus.OUT_FOR_DELIVERY,
+    ])('refuses the sender once the parcel is %s', async (status) => {
+      parcelRepository.findOne.mockResolvedValue(
+        buildParcel({ status, sender }),
+      );
+
+      await expect(service.cancelParcel('TRK-TEST', sender)).rejects.toThrow(
+        /already been picked up/,
+      );
     });
   });
 });

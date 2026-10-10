@@ -31,6 +31,6 @@ export class ParcelStatusLog {
   @JoinColumn({ name: 'changedById' })
   changedBy: User;
 
-  @CreateDateColumn()
+  @CreateDateColumn({ type: 'timestamptz' })
   createdAt: Date;
 }

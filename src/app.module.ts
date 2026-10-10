@@ -1,7 +1,8 @@
 import { Module } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
-import { APP_GUARD } from '@nestjs/core';
+import { APP_FILTER, APP_GUARD } from '@nestjs/core';
 import { ThrottlerGuard, ThrottlerModule } from '@nestjs/throttler';
+import { UniqueViolationFilter } from './common/filters/unique-violation.filter';
 import { THROTTLER_CONFIG } from './common/throttler.config';
 import { AppController } from './app.controller';
 import { AppService } from './app.service';
@@ -39,6 +40,8 @@ import { UserModule } from './user/user.module';
     // Applied globally; handlers opt into a tighter named throttle with
     // `@Throttle(...)`, or out entirely with `@SkipThrottle()`.
     { provide: APP_GUARD, useClass: ThrottlerGuard },
+    // A lost race on a unique column answers 409 instead of a bare 500.
+    { provide: APP_FILTER, useClass: UniqueViolationFilter },
   ],
 })
 export class AppModule {}

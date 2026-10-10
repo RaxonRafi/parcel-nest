@@ -1,3 +1,5 @@
+import { escapeHtml } from './layout.template';
+
 /** Plain HTML with inline styles — mail clients strip stylesheets. */
 export function passwordResetEmail(
   name: string,
@@ -36,12 +38,4 @@ export function passwordResetEmail(
 </div>`.trim();
 
   return { html, text };
-}
-
-function escapeHtml(value: string): string {
-  return value
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;');
 }

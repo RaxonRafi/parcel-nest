@@ -3,7 +3,6 @@ import {
   Injectable,
   UnauthorizedException,
 } from '@nestjs/common';
-import { ConfigService } from '@nestjs/config';
 import { TokenService } from '../../token/services/token.service';
 import { User } from '../../user/entities/user.entity';
 import { UserService } from '../../user/services/user.service';
@@ -28,7 +27,6 @@ export class AuthService {
     private readonly sessionService: SessionService,
     private readonly passwordResetService: PasswordResetService,
     private readonly emailVerificationService: EmailVerificationService,
-    private readonly config: ConfigService,
   ) {}
 
   async login(payload: LoginDto): Promise<AuthResponse> {
@@ -47,7 +45,7 @@ export class AuthService {
     await this.sessionService.record(
       user,
       tokens.refreshToken,
-      this.refreshExpiryDate(),
+      this.tokenService.refreshTokenExpiresAt(),
     );
 
     return { user: sanitizeUser(user), ...tokens };
@@ -65,17 +63,22 @@ export class AuthService {
     const user = await this.userService.findByEmail(payload.email);
 
     if (!user) {
-      throw new BadRequestException('User does not exist');
+      throw new UnauthorizedException('Session has ended — sign in again');
     }
 
     this.assertCanSignIn(user);
 
+    // The revoke is the claim: of two requests racing with the same token
+    // only one gets `true`, so a refresh token is never exchanged twice.
+    if (!(await this.sessionService.revoke(refreshToken))) {
+      throw new UnauthorizedException('Session has ended — sign in again');
+    }
+
     const tokens = this.tokenService.createUserTokens(user);
-    await this.sessionService.revoke(refreshToken);
     await this.sessionService.record(
       user,
       tokens.refreshToken,
-      this.refreshExpiryDate(),
+      this.tokenService.refreshTokenExpiresAt(),
     );
 
     return tokens;
@@ -88,7 +91,8 @@ export class AuthService {
    */
   async logout(user: User, refreshToken?: string): Promise<MessageResponse> {
     if (refreshToken) {
-      await this.sessionService.revoke(refreshToken);
+      // Scoped to the caller: the token comes from the body, not the header.
+      await this.sessionService.revoke(refreshToken, user.id);
       return { message: 'Logged out successfully' };
     }
 
@@ -122,6 +126,12 @@ export class AuthService {
     const grant = await this.passwordResetService.consume(token);
 
     await this.userService.setPassword(grant.user, newPassword);
+    // The link only reaches whoever reads that inbox, so opening it proves
+    // the address just as a confirmation link would. This is also how a
+    // receiver claiming a placeholder account ends up verified.
+    if (!grant.user.isVerified) {
+      await this.userService.markVerified(grant.user.id);
+    }
     // Whoever prompted the reset may be holding a token; end all of them.
     await this.sessionService.revokeAllForUser(grant.user.id);
 
@@ -177,29 +187,12 @@ export class AuthService {
     };
   }
 
-  /**
-   * Mirrors JWT_REFRESH_EXPIRES so the stored row expires with the token it
-   * tracks. Supports the `7d` / `12h` / `30m` / `3600` forms jsonwebtoken takes.
-   */
-  private refreshExpiryDate(): Date {
-    const raw = this.config.getOrThrow<string>('JWT_REFRESH_EXPIRES').trim();
-    const match = /^(\d+)\s*([smhd])?$/.exec(raw);
-
-    if (!match) {
-      throw new Error(`Unsupported JWT_REFRESH_EXPIRES value: ${raw}`);
-    }
-
-    const unitMs = { s: 1_000, m: 60_000, h: 3_600_000, d: 86_400_000 };
-    const ms = Number(match[1]) * (match[2] ? unitMs[match[2]] : 1_000);
-
-    return new Date(Date.now() + ms);
-  }
-
+  /** 401, matching what `JwtAuthGuard` answers for the same account. */
   private assertCanSignIn(user: User): void {
     const blockReason = this.userService.getSignInBlockReason(user);
 
     if (blockReason) {
-      throw new BadRequestException(blockReason);
+      throw new UnauthorizedException(blockReason);
     }
   }
 }

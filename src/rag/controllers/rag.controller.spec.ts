@@ -28,4 +28,18 @@ describe('RagController', () => {
   it('should be defined', () => {
     expect(controller).toBeDefined();
   });
+
+  // `ask` once lost its guard to a decorator mix-up and was publicly
+  // callable; overriding guards above would hide that, so read the metadata.
+  it.each(['ask', 'askStream'] as const)(
+    'requires a signed-in user on %s',
+    (handler) => {
+      const guards = Reflect.getMetadata(
+        '__guards__',
+        RagController.prototype[handler],
+      ) as unknown[] | undefined;
+
+      expect(guards).toContain(JwtAuthGuard);
+    },
+  );
 });

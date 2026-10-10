@@ -41,7 +41,8 @@ export function claimAccountTemplate(
   senderName: string,
   trackingId: string,
   url: string,
-  expiryMinutes: number,
+  /** Human-readable lifetime, e.g. "7 days". */
+  expiresIn: string,
 ): { subject: string; html: string; text: string } {
   return {
     subject: `${senderName} sent you a parcel — set up your account`,
@@ -53,7 +54,7 @@ export function claimAccountTemplate(
           `${escapeHtml(senderName)} has sent you a parcel, tracking id <strong>${escapeHtml(trackingId)}</strong>. We created an account for you so you can follow it.`,
         ),
         paragraph(
-          `Choose a password to finish setting it up — the link is valid for ${expiryMinutes} minutes.`,
+          `Choose a password to finish setting it up — the link is valid for ${expiresIn}.`,
         ),
         button(url, 'Set up your account'),
       ].join('\n'),
@@ -66,7 +67,7 @@ export function claimAccountTemplate(
       '',
       url,
       '',
-      `The link is valid for ${expiryMinutes} minutes.`,
+      `The link is valid for ${expiresIn}.`,
     ].join('\n'),
   };
 }

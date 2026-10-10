@@ -49,6 +49,10 @@ export interface ParcelIndexDocument {
   recipientName: string;
   updatedAt: string;
   notes?: string;
+  /** The only non-admin accounts the assistant may show this parcel to. */
+  senderId?: string;
+  receiverId?: string;
+  courierId?: string;
 }
 
 /**

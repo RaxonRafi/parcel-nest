@@ -6,8 +6,10 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
+import { randomBytes } from 'crypto';
 import {
   Between,
+  FindOperator,
   ILike,
   In,
   IsNull,
@@ -71,10 +73,7 @@ const COURIER_STATUSES: ParcelStatus[] = [
 ];
 
 /** Builds the right TypeORM operator for whichever bounds were supplied. */
-function dateRange(
-  from?: string,
-  to?: string,
-): ReturnType<typeof Between> | ReturnType<typeof MoreThanOrEqual> | undefined {
+function dateRange(from?: string, to?: string): FindOperator<Date> | undefined {
   if (from && to) return Between(new Date(from), new Date(to));
   if (from) return MoreThanOrEqual(new Date(from));
   if (to) return LessThanOrEqual(new Date(to));
@@ -98,8 +97,6 @@ export class ParcelService {
   constructor(
     @InjectRepository(Parcel)
     private readonly parcelRepository: Repository<Parcel>,
-    @InjectRepository(ParcelStatusLog)
-    private readonly statusLogRepository: Repository<ParcelStatusLog>,
     private readonly userService: UserService,
     private readonly ragService: RagService,
     private readonly notifications: ParcelNotificationService,
@@ -116,6 +113,10 @@ export class ParcelService {
     const { user: receiver, created: receiverIsNew } =
       await this.resolveReceiver(payload);
 
+    if (receiver.id === sender.id) {
+      throw new BadRequestException('You cannot send a parcel to yourself');
+    }
+
     const weightKg = payload.weightKg ?? 1;
     const codAmount = payload.codAmount ?? 0;
     // Priced here, never taken from the request.
@@ -126,7 +127,7 @@ export class ParcelService {
     );
 
     const parcel = this.parcelRepository.create({
-      trackingId: this.generateTrackingId(),
+      trackingId: await this.generateTrackingId(),
       sender,
       receiver,
       senderName: sender.name,
@@ -189,9 +190,16 @@ export class ParcelService {
     this.assertTransitionAllowed(parcel.status, payload.status);
 
     const from = parcel.status;
-    parcel.status = payload.status;
-    await this.parcelRepository.save(parcel);
-    await this.addStatusLog(parcel, payload.status, actor, payload.note);
+    if (payload.status === ParcelStatus.DELIVERED) {
+      this.markDelivered(parcel);
+    } else {
+      parcel.status = payload.status;
+    }
+    await this.persist(parcel, {
+      status: payload.status,
+      actor,
+      note: payload.note,
+    });
     await this.auditService.record({
       actor,
       action: AuditAction.PARCEL_STATUS_CHANGED,
@@ -229,14 +237,12 @@ export class ParcelService {
       await this.userService.findDeliveryPersonnelOrFail(deliveryPersonnelId);
 
     parcel.deliveryPersonnel = courier;
-    await this.parcelRepository.save(parcel);
-    await this.addStatusLog(
-      parcel,
-      parcel.status,
-      admin,
+    await this.persist(parcel, {
+      status: parcel.status,
+      actor: admin,
       // First name only: these notes surface on the public tracking page.
-      `Assigned to ${firstName(courier.name)}`,
-    );
+      note: `Assigned to ${firstName(courier.name)}`,
+    });
     await this.auditService.record({
       actor: admin,
       action: AuditAction.PARCEL_ASSIGNED,
@@ -264,13 +270,11 @@ export class ParcelService {
     const previousCourier = parcel.deliveryPersonnel;
     const previousName = firstName(previousCourier.name);
     parcel.deliveryPersonnel = null;
-    await this.parcelRepository.save(parcel);
-    await this.addStatusLog(
-      parcel,
-      parcel.status,
-      admin,
-      `Unassigned from ${previousName}`,
-    );
+    await this.persist(parcel, {
+      status: parcel.status,
+      actor: admin,
+      note: `Unassigned from ${previousName}`,
+    });
     await this.auditService.record({
       actor: admin,
       action: AuditAction.PARCEL_UNASSIGNED,
@@ -316,16 +320,23 @@ export class ParcelService {
       throw new ForbiddenException('You can only cancel your own parcels');
     }
 
+    this.assertNotBlocked(parcel);
     this.assertTransitionAllowed(parcel.status, ParcelStatus.CANCELLED);
 
+    // Once a courier has the parcel, pulling it back is an operational
+    // decision: an admin can still cancel it through the status route.
+    if (parcel.status !== ParcelStatus.PENDING) {
+      throw new BadRequestException(
+        'This parcel has already been picked up — contact support to cancel it',
+      );
+    }
+
     parcel.status = ParcelStatus.CANCELLED;
-    await this.parcelRepository.save(parcel);
-    await this.addStatusLog(
-      parcel,
-      ParcelStatus.CANCELLED,
-      sender,
-      'Cancelled by sender',
-    );
+    await this.persist(parcel, {
+      status: ParcelStatus.CANCELLED,
+      actor: sender,
+      note: 'Cancelled by sender',
+    });
 
     return this.refreshAndIndex(trackingId);
   }
@@ -337,36 +348,56 @@ export class ParcelService {
       throw new ForbiddenException('You can only confirm your own parcels');
     }
 
+    this.assertNotBlocked(parcel);
     this.assertTransitionAllowed(parcel.status, ParcelStatus.DELIVERED);
 
-    parcel.status = ParcelStatus.DELIVERED;
-    await this.parcelRepository.save(parcel);
-    await this.addStatusLog(
-      parcel,
-      ParcelStatus.DELIVERED,
-      receiver,
-      'Delivery confirmed by receiver',
-    );
+    this.markDelivered(parcel);
+    await this.persist(parcel, {
+      status: ParcelStatus.DELIVERED,
+      actor: receiver,
+      note: 'Delivery confirmed by receiver',
+    });
 
     return this.refreshAndIndex(trackingId);
   }
 
   async blockParcel(trackingId: string, admin: User): Promise<Parcel> {
+    return this.setBlocked(trackingId, true, admin);
+  }
+
+  /** Releases a hold, returning the parcel to wherever it was in its journey. */
+  async unblockParcel(trackingId: string, admin: User): Promise<Parcel> {
+    return this.setBlocked(trackingId, false, admin);
+  }
+
+  private async setBlocked(
+    trackingId: string,
+    blocked: boolean,
+    admin: User,
+  ): Promise<Parcel> {
     const parcel = await this.findByTrackingIdOrFail(trackingId);
-    parcel.isBlocked = true;
-    await this.parcelRepository.save(parcel);
-    await this.addStatusLog(
-      parcel,
-      parcel.status,
-      admin,
-      'Parcel blocked by admin',
-    );
+
+    if (parcel.isBlocked === blocked) {
+      throw new BadRequestException(
+        `Parcel is ${blocked ? 'already' : 'not'} blocked`,
+      );
+    }
+
+    parcel.isBlocked = blocked;
+    await this.persist(parcel, {
+      status: parcel.status,
+      actor: admin,
+      // `describeEvent` keys the realtime event type off these prefixes.
+      note: blocked ? 'Parcel blocked by admin' : 'Parcel unblocked by admin',
+    });
     await this.auditService.record({
       actor: admin,
-      action: AuditAction.PARCEL_BLOCKED,
+      action: blocked
+        ? AuditAction.PARCEL_BLOCKED
+        : AuditAction.PARCEL_UNBLOCKED,
       targetType: AuditTargetType.PARCEL,
       targetId: parcel.trackingId,
-      summary: `Blocked while ${parcel.status}`,
+      summary: `${blocked ? 'Blocked' : 'Unblocked'} while ${parcel.status}`,
       metadata: { status: parcel.status },
     });
 
@@ -427,6 +458,8 @@ export class ParcelService {
       }
     }
 
+    this.assertNotBlocked(parcel);
+
     if (parcel.status === ParcelStatus.CANCELLED) {
       throw new BadRequestException('Cannot deliver a cancelled parcel');
     }
@@ -442,20 +475,24 @@ export class ParcelService {
     parcel.receivedBy = payload.receivedBy ?? parcel.receiverName;
     parcel.isCodCollected = payload.codCollected ?? parcel.isCodCollected;
 
-    // Proof is only meaningful alongside the transition it evidences.
-    if (parcel.status !== ParcelStatus.DELIVERED) {
+    // Proof is only meaningful alongside the transition it evidences. A
+    // parcel that is already delivered keeps the time it was delivered at;
+    // the proof is being attached after the fact.
+    const alreadyDelivered = parcel.status === ParcelStatus.DELIVERED;
+    if (!alreadyDelivered) {
       this.assertTransitionAllowed(parcel.status, ParcelStatus.DELIVERED);
-      parcel.status = ParcelStatus.DELIVERED;
     }
+    this.markDelivered(parcel);
 
-    parcel.deliveredAt = new Date();
-    await this.parcelRepository.save(parcel);
-    await this.addStatusLog(
-      parcel,
-      ParcelStatus.DELIVERED,
+    await this.persist(parcel, {
+      status: ParcelStatus.DELIVERED,
       actor,
-      payload.note ?? `Delivered to ${parcel.receivedBy}`,
-    );
+      note:
+        payload.note ??
+        (alreadyDelivered
+          ? 'Proof of delivery added'
+          : `Delivered to ${parcel.receivedBy}`),
+    });
 
     return this.refreshAndIndex(trackingId);
   }
@@ -510,8 +547,8 @@ export class ParcelService {
       await Promise.all([
         this.dailyCounts(since),
         this.statusTimings(since),
-        this.courierThroughput(),
-        this.revenueSummary(),
+        this.courierThroughput(since),
+        this.revenueSummary(since),
         this.averageFulfilmentHours(since),
       ]);
 
@@ -527,7 +564,7 @@ export class ParcelService {
 
   /** One row per day in the window, zero-filled so charts have no gaps. */
   private async dailyCounts(since: Date): Promise<DailyCount[]> {
-    const rows = await this.parcelRepository.query(
+    return this.rawQuery<DailyCount>(
       `SELECT to_char(d.day, 'YYYY-MM-DD')                        AS date,
               COALESCE(c.created, 0)::int                          AS created,
               COALESCE(v.delivered, 0)::int                        AS delivered
@@ -543,8 +580,6 @@ export class ParcelService {
         ORDER BY d.day`,
       [since],
     );
-
-    return rows as DailyCount[];
   }
 
   /**
@@ -553,14 +588,34 @@ export class ParcelService {
    * is excluded, so this measures completed dwell time only.
    */
   private async statusTimings(since: Date): Promise<StatusTiming[]> {
-    const rows = await this.parcelRepository.query(
-      `WITH spans AS (
+    const rows = await this.rawQuery<{
+      status: string;
+      averageHours: string | null;
+      sampleSize: number;
+    }>(
+      // Assigning, unassigning and blocking each append a log row without
+      // changing the status. `changes` drops those repeats first, so a span
+      // runs from entering a status to leaving it rather than being cut short
+      // at the next note.
+      `WITH ordered AS (
+         SELECT "parcelId", status, "createdAt",
+                LAG(status) OVER (
+                  PARTITION BY "parcelId" ORDER BY "createdAt"
+                ) AS previous
+           FROM parcel_status_logs
+          WHERE "createdAt" >= $1
+       ),
+       changes AS (
+         SELECT "parcelId", status, "createdAt"
+           FROM ordered
+          WHERE previous IS DISTINCT FROM status
+       ),
+       spans AS (
          SELECT status,
                 LEAD("createdAt") OVER (
                   PARTITION BY "parcelId" ORDER BY "createdAt"
                 ) - "createdAt" AS dwell
-           FROM parcel_status_logs
-          WHERE "createdAt" >= $1
+           FROM changes
        )
        SELECT status,
               ROUND(AVG(EXTRACT(EPOCH FROM dwell) / 3600)::numeric, 2) AS "averageHours",
@@ -572,21 +627,22 @@ export class ParcelService {
       [since],
     );
 
-    return rows.map(
-      (r: {
-        status: string;
-        averageHours: string | null;
-        sampleSize: number;
-      }) => ({
-        status: r.status,
-        averageHours: r.averageHours === null ? null : Number(r.averageHours),
-        sampleSize: r.sampleSize,
-      }),
-    );
+    return rows.map((r) => ({
+      status: r.status,
+      averageHours: r.averageHours === null ? null : Number(r.averageHours),
+      sampleSize: r.sampleSize,
+    }));
   }
 
-  private async courierThroughput(): Promise<CourierThroughput[]> {
-    const rows = await this.parcelRepository.query(
+  /** Per courier, over parcels booked inside the window. */
+  private async courierThroughput(since: Date): Promise<CourierThroughput[]> {
+    const rows = await this.rawQuery<{
+      courierId: string;
+      courierName: string;
+      active: number;
+      delivered: number;
+      averageDeliveryHours: string | null;
+    }>(
       `SELECT u.id                                                   AS "courierId",
               u.name                                                 AS "courierName",
               COUNT(*) FILTER (WHERE p.status NOT IN ('DELIVERED','CANCELLED'))::int AS active,
@@ -597,36 +653,32 @@ export class ParcelService {
                                                                      AS "averageDeliveryHours"
          FROM users u
          JOIN parcels p ON p."deliveryPersonnelId" = u.id
+        WHERE p."createdAt" >= $1
         GROUP BY u.id, u.name
         ORDER BY delivered DESC, active DESC`,
+      [since],
     );
 
-    return rows.map(
-      (r: {
-        courierId: string;
-        courierName: string;
-        active: number;
-        delivered: number;
-        averageDeliveryHours: string | null;
-      }) => ({
-        ...r,
-        averageDeliveryHours:
-          r.averageDeliveryHours === null
-            ? null
-            : Number(r.averageDeliveryHours),
-      }),
-    );
+    return rows.map((r) => ({
+      ...r,
+      averageDeliveryHours:
+        r.averageDeliveryHours === null ? null : Number(r.averageDeliveryHours),
+    }));
   }
 
-  private async revenueSummary(): Promise<RevenueSummary> {
-    const [row] = await this.parcelRepository.query(
+  /** Money on parcels booked inside the window. */
+  private async revenueSummary(since: Date): Promise<RevenueSummary> {
+    // Postgres returns `numeric` sums as strings.
+    const [row] = await this.rawQuery<Record<keyof RevenueSummary, string>>(
       `SELECT COALESCE(SUM("deliveryFee") FILTER (WHERE status <> 'CANCELLED'), 0)   AS "deliveryFeesBooked",
               COALESCE(SUM("deliveryFee") FILTER (WHERE status = 'DELIVERED'), 0)    AS "deliveryFeesDelivered",
               COALESCE(SUM("codAmount") FILTER (
                 WHERE "isCodCollected" = false AND status NOT IN ('DELIVERED','CANCELLED')
               ), 0)                                                                  AS "codOutstanding",
               COALESCE(SUM("codAmount") FILTER (WHERE "isCodCollected" = true), 0)   AS "codCollected"
-         FROM parcels`,
+         FROM parcels
+        WHERE "createdAt" >= $1`,
+      [since],
     );
 
     return {
@@ -638,7 +690,7 @@ export class ParcelService {
   }
 
   private async averageFulfilmentHours(since: Date): Promise<number | null> {
-    const [row] = await this.parcelRepository.query(
+    const [row] = await this.rawQuery<{ hours: string | null }>(
       `SELECT ROUND(AVG(
                 EXTRACT(EPOCH FROM ("deliveredAt" - "createdAt")) / 3600
               )::numeric, 2) AS hours
@@ -652,6 +704,11 @@ export class ParcelService {
       : Number(row.hours);
   }
 
+  /** `Repository.query` resolves to `any`; this names the row shape once. */
+  private rawQuery<Row>(sql: string, parameters: unknown[]): Promise<Row[]> {
+    return this.parcelRepository.query(sql, parameters);
+  }
+
   // ─── Internals ────────────────────────────────────────────────────────────
 
   /**
@@ -662,10 +719,11 @@ export class ParcelService {
     payload: CreateParcelDto,
   ): Promise<{ user: User; created: boolean }> {
     if (payload.receiverId) {
-      return {
-        user: await this.userService.findEntityByIdOrFail(payload.receiverId),
-        created: false,
-      };
+      const user = await this.userService.findEntityByIdOrFail(
+        payload.receiverId,
+      );
+      this.userService.assertCanReceive(user);
+      return { user, created: false };
     }
 
     if (payload.receiverEmail) {
@@ -745,6 +803,51 @@ export class ParcelService {
     }
   }
 
+  private assertNotBlocked(parcel: Parcel): void {
+    if (parcel.isBlocked) {
+      throw new BadRequestException('Parcel is blocked');
+    }
+  }
+
+  /**
+   * The one way a parcel becomes DELIVERED, whichever route asked for it.
+   *
+   * Three routes can close a parcel out (status update, receiver confirmation
+   * and delivery proof) and they used to disagree: only proof stamped
+   * `deliveredAt` and only proof checked that cash had been collected.
+   */
+  private markDelivered(parcel: Parcel): void {
+    if (parcel.codAmount > 0 && !parcel.isCodCollected) {
+      throw new BadRequestException(
+        `This parcel is cash on delivery (${parcel.codAmount}) — the courier must submit delivery proof with codCollected before it can be marked delivered`,
+      );
+    }
+
+    parcel.status = ParcelStatus.DELIVERED;
+    parcel.deliveredAt ??= new Date();
+  }
+
+  /**
+   * Saves a parcel together with the status-log row describing the change, in
+   * one transaction — so a parcel never moves without its timeline entry.
+   */
+  private async persist(
+    parcel: Parcel,
+    log: { status: ParcelStatus; actor: User; note?: string },
+  ): Promise<void> {
+    await this.parcelRepository.manager.transaction(async (manager) => {
+      await manager.save(parcel);
+      await manager.save(
+        manager.create(ParcelStatusLog, {
+          parcel,
+          status: log.status,
+          changedBy: log.actor,
+          note: log.note,
+        }),
+      );
+    });
+  }
+
   private assertCourierMaySetStatus(
     parcel: Parcel,
     status: ParcelStatus,
@@ -807,21 +910,6 @@ export class ParcelService {
     return sanitizeParcel(parcel);
   }
 
-  private async addStatusLog(
-    parcel: Parcel,
-    status: ParcelStatus,
-    user: User,
-    note?: string,
-  ): Promise<void> {
-    const log = this.statusLogRepository.create({
-      parcel,
-      status,
-      changedBy: user,
-      note,
-    });
-    await this.statusLogRepository.save(log);
-  }
-
   /**
    * Fire-and-forget re-index. This used to POST to `/api/rag/index/parcel`
    * over HTTP, which only worked because that route was unauthenticated —
@@ -841,6 +929,9 @@ export class ParcelService {
       recipientName: parcel.receiverName,
       updatedAt: parcel.updatedAt.toISOString(),
       notes: latestNote,
+      senderId: parcel.sender?.id,
+      receiverId: parcel.receiver?.id,
+      courierId: parcel.deliveryPersonnel?.id,
     };
 
     try {
@@ -853,8 +944,31 @@ export class ParcelService {
     }
   }
 
-  private generateTrackingId(): string {
-    const suffix = Math.random().toString(36).slice(2, 8).toUpperCase();
-    return `TRK-${Date.now().toString(36).toUpperCase()}${suffix}`;
+  /**
+   * `TRK-` plus twelve characters from the OS random source. The column is
+   * unique, so a candidate is checked before use instead of letting the rare
+   * collision surface as a failed insert.
+   */
+  private async generateTrackingId(): Promise<string> {
+    for (let attempt = 0; attempt < 5; attempt++) {
+      const trackingId = `TRK-${randomTrackingSuffix()}`;
+
+      if (!(await this.parcelRepository.exists({ where: { trackingId } }))) {
+        return trackingId;
+      }
+    }
+
+    throw new Error('Could not allocate a unique tracking id');
   }
+}
+
+const TRACKING_ALPHABET = '0123456789ABCDEFGHJKMNPQRSTVWXYZ';
+
+/** Crockford base32: no I, L, O or U, so a code survives being read aloud. */
+function randomTrackingSuffix(length = 12): string {
+  // 32 symbols divide 256 evenly, so the modulo introduces no bias.
+  return Array.from(
+    randomBytes(length),
+    (byte) => TRACKING_ALPHABET[byte % TRACKING_ALPHABET.length],
+  ).join('');
 }

@@ -23,10 +23,12 @@ import {
 } from '@nestjs/swagger';
 import { Throttle } from '@nestjs/throttler';
 import multer from 'multer';
+import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { Roles } from '../../common/decorators/roles.decorator';
 import { JwtAuthGuard } from '../../common/guards/jwt-auth.guard';
 import { RolesGuard } from '../../common/guards/roles.guard';
 import { JWT_AUTH } from '../../config/swagger.config';
+import { User } from '../../user/entities/user.entity';
 import { Role } from '../../user/types/user.types';
 import * as fs from 'fs';
 import { AskDto } from '../dto/ask.dto';
@@ -38,10 +40,9 @@ import {
   RagMessageResponseDto,
 } from '../dto/rag-response.dto';
 import { UploadPdfDto, UploadPdfFormDto } from '../dto/upload-pdf.dto';
+import { UPLOAD_DIR } from '../rag.constants';
 import { RagService } from '../services/rag.service';
 import { RagAnswer } from '../types/rag.types';
-
-const UPLOAD_DIR = '/tmp/uploads';
 
 @ApiTags('RAG')
 @Controller('rag')
@@ -72,7 +73,10 @@ export class RagController {
           cb(null, UPLOAD_DIR);
         },
         filename: (_req, file, cb) => {
-          cb(null, `${Date.now()}-${file.originalname}`);
+          // The original name is client-supplied; only its safe characters
+          // are allowed anywhere near a filesystem path.
+          const safeName = file.originalname.replace(/[^\w.-]+/g, '_');
+          cb(null, `${Date.now()}-${safeName}`);
         },
       }),
       fileFilter: (_req, file, cb) => {
@@ -132,26 +136,41 @@ export class RagController {
   @ApiOperation({
     summary: 'Ask a question over the indexed documents',
     description:
-      'Any signed-in user. Each call bills an embedding and a completion, so it is not public.',
+      'Any signed-in user. Each call bills an embedding and a completion, so it is not public. Policy documents are searchable by everyone; parcels only by an admin or by their sender, receiver or courier.',
   })
   @ApiResponse({ status: 201, type: RagAnswerDto })
   @ApiResponse({ status: 400, description: 'Question is required' })
+  @ApiResponse({ status: 503, description: 'Assistant is not configured' })
   @ApiBearerAuth(JWT_AUTH)
+  @Throttle({ ai: { limit: 20, ttl: 60_000 } })
   @UseGuards(JwtAuthGuard)
+  @Post('ask')
+  ask(@Body() body: AskDto, @CurrentUser() user: User): Promise<RagAnswer> {
+    return this.ragService.ask(body.question, user, body.filter ?? 'all');
+  }
+
   @ApiBearerAuth(JWT_AUTH)
   @ApiOperation({
     summary: 'Ask a question, streamed',
     description:
-      'Server-sent events. Emits one `sources` event, then a run of `token` events, then exactly one `done` or `error`. Same auth and cost as `ask`.',
+      'Server-sent events. Emits one `sources` event, then a run of `token` events, then exactly one `done` or `error`. Same auth, scoping and cost as `ask`.',
   })
   @ApiResponse({
     status: 200,
     description: 'text/event-stream of RagStreamChunk JSON payloads',
   })
+  @ApiResponse({ status: 503, description: 'Assistant is not configured' })
   @Throttle({ ai: { limit: 20, ttl: 60_000 } })
   @UseGuards(JwtAuthGuard)
   @Post('ask/stream')
-  async askStream(@Body() body: AskDto, @Res() res: Response): Promise<void> {
+  async askStream(
+    @Body() body: AskDto,
+    @CurrentUser() user: User,
+    @Res() res: Response,
+  ): Promise<void> {
+    // Checked before any header goes out, while a 503 is still possible.
+    this.ragService.assertAvailable();
+
     res.setHeader('Content-Type', 'text/event-stream');
     res.setHeader('Cache-Control', 'no-cache, no-transform');
     res.setHeader('Connection', 'keep-alive');
@@ -164,24 +183,26 @@ export class RagController {
       clientGone = true;
     });
 
-    for await (const chunk of this.ragService.askStream(
-      body.question,
-      body.filter ?? 'all',
-    )) {
-      // Stop pulling tokens from the model the moment nobody is listening —
-      // every one of them costs money.
-      if (clientGone) break;
-      res.write(`data: ${JSON.stringify(chunk)}\n\n`);
+    try {
+      for await (const chunk of this.ragService.askStream(
+        body.question,
+        user,
+        body.filter ?? 'all',
+      )) {
+        // Stop pulling tokens from the model the moment nobody is listening —
+        // every one of them costs money.
+        if (clientGone) break;
+        res.write(`data: ${JSON.stringify(chunk)}\n\n`);
+      }
+    } catch {
+      // Retrieval failed after the headers were sent, so it has to be
+      // reported in-band like any other stream error.
+      res.write(
+        `data: ${JSON.stringify({ type: 'error', message: 'The answer could not be completed' })}\n\n`,
+      );
     }
 
     res.end();
-  }
-
-  @Throttle({ ai: { limit: 20, ttl: 60_000 } })
-  @Post('ask')
-  ask(@Body() body: AskDto): Promise<RagAnswer> {
-    if (!body.question) throw new BadRequestException('Question is required');
-    return this.ragService.ask(body.question, body.filter ?? 'all');
   }
 
   // ─── Index single parcel ──────────────────────────────────────────────────

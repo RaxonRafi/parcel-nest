@@ -17,18 +17,19 @@ import {
   PHONE_REGEX,
 } from '../../common/constants/validation.constants';
 import { Role } from '../types/user.types';
+import { trimString } from '../../common/utils/trim.transform';
 
 export class CreateUserDto {
   @ApiProperty({ example: 'John Sender' })
   @IsString()
   @IsNotEmpty({ message: 'Name is required' })
   @MaxLength(120)
-  @Transform(({ value }) => (typeof value === 'string' ? value.trim() : value))
+  @Transform(trimString)
   name!: string;
 
   @ApiProperty({ format: 'email', example: 'john@example.com' })
   @IsEmail({}, { message: 'A valid email address is required' })
-  @Transform(({ value }) => (typeof value === 'string' ? value.trim() : value))
+  @Transform(trimString)
   email!: string;
 
   @ApiProperty({

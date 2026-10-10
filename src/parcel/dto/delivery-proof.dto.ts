@@ -10,6 +10,7 @@ import {
   IsUrl,
   MaxLength,
 } from 'class-validator';
+import { trimString } from '../../common/utils/trim.transform';
 
 export class DeliveryProofDto {
   @ApiProperty({
@@ -30,7 +31,7 @@ export class DeliveryProofDto {
   @IsOptional()
   @IsString()
   @MaxLength(120)
-  @Transform(({ value }) => (typeof value === 'string' ? value.trim() : value))
+  @Transform(trimString)
   receivedBy?: string;
 
   @ApiPropertyOptional({ example: 'Left with building security' })

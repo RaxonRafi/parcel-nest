@@ -19,7 +19,7 @@ export class KeepAliveController {
   ) {}
 
   @ApiOperation({
-    summary: 'Keep the database warm',
+    summary: 'Keep the database warm and prune expired tokens',
     description:
       'Called by the Vercel cron. Requires `Authorization: Bearer <CRON_SECRET>` — the JWT from the Authorize dialog does not apply here.',
   })
@@ -35,6 +35,10 @@ export class KeepAliveController {
       properties: {
         ok: { type: 'boolean', example: true },
         at: { type: 'string', format: 'date-time' },
+        pruned: {
+          type: 'number',
+          description: 'Expired token rows removed by this run',
+        },
       },
     },
   })
@@ -44,7 +48,8 @@ export class KeepAliveController {
     this.assertCronRequest(auth);
 
     const at = await this.keepAliveService.ping();
-    return { ok: true, at };
+    const pruned = await this.keepAliveService.pruneExpiredTokens();
+    return { ok: true, at, pruned };
   }
 
   private assertCronRequest(auth?: string): void {

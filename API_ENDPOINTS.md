@@ -163,14 +163,19 @@ revoked, so:
 
 - `refresh-token` **rotates**: the token you send is revoked and a new pair
   returned. Store both from the response — reusing the old one gets a `401`.
-- `logout` revokes the `refreshToken` you pass in the body, or **every** session
+- `Authorization` must be `Bearer <accessToken>`; a bare token is rejected.
+- `logout` revokes the `refreshToken` you pass in the body (only if it is the
+  caller's own), or **every** session
   for the user when the body is omitted. The access token stays valid until it
   expires (15 minutes) — that is the residual window.
 - `change-password` and `reset-password` both end every session.
 
 `forgot-password` always returns the same message whether or not the address has
 an account, so it cannot be used to discover who is registered. The emailed
-token is single-use and expires after 30 minutes.
+token is single-use and expires after 30 minutes. Completing a reset also
+marks the address verified, since the link proved it.
+
+Blocking a user ends all of their sessions and disconnects their sockets.
 
 ## Users
 
@@ -189,8 +194,11 @@ token is single-use and expires after 30 minutes.
 | ADMIN | `PATCH` | `/api/users/:userId/delivery/reject` | `User` — `role: "SENDER"` |
 
 `register` is public, but asking for `role: "ADMIN"` in the body additionally
-requires an existing admin's bearer token on the request. Any other role sent
-without a token is ignored and the account is created as `SENDER`.
+requires an existing admin's bearer token on the request. `SENDER` (the
+default) and `RECEIVER` are created as asked; `DELIVERY_PERSONNEL` becomes
+`PENDING_DELIVERY`, see below. A duplicate email or `nidNumber` answers `409`.
+
+The returned `refreshToken` is a live session, exactly as after `login`.
 
 **New accounts start unverified.** `isVerified` is now `false` on creation and
 a confirmation email goes out; `POST /api/auth/verify-email` with the token
@@ -212,17 +220,35 @@ them to `SENDER` so the account stays usable and they can apply again.
 | SENDER, ADMIN | `POST` | `/api/parcels` | `Parcel` |
 | SENDER | `GET` | `/api/parcels/my-parcels` | `Paginated<Parcel>` |
 | SENDER | `PATCH` | `/api/parcels/:trackingId/cancel` | `Parcel` |
-| RECEIVER | `GET` | `/api/parcels/incoming-parcels` | `Paginated<Parcel>` |
-| RECEIVER | `GET` | `/api/parcels/delivery-history` | `Paginated<Parcel>` — by `updatedAt` desc |
-| RECEIVER | `PATCH` | `/api/parcels/:trackingId/confirm` | `Parcel` |
+| Any | `GET` | `/api/parcels/incoming-parcels` | `Paginated<Parcel>` — addressed to you |
+| Any | `GET` | `/api/parcels/delivery-history` | `Paginated<Parcel>` — by `updatedAt` desc |
+| Any | `PATCH` | `/api/parcels/:trackingId/confirm` | `Parcel` — only the parcel's receiver |
 | ADMIN | `GET` | `/api/parcels` | `Paginated<Parcel>` |
 | ADMIN | `PATCH` | `/api/parcels/:trackingId/block` | `Parcel` |
+| ADMIN | `PATCH` | `/api/parcels/:trackingId/unblock` | `Parcel` |
 | ADMIN | `PATCH` | `/api/parcels/:trackingId/assign` | `Parcel` — body `{ deliveryPersonnelId }` |
 | ADMIN | `PATCH` | `/api/parcels/:trackingId/unassign` | `Parcel` |
 | ADMIN, DELIVERY_PERSONNEL | `PATCH` | `/api/parcels/:trackingId/status` | `Parcel` |
 | ADMIN, DELIVERY_PERSONNEL | `PATCH` | `/api/parcels/:trackingId/delivery-proof` | `Parcel` |
 | DELIVERY_PERSONNEL | `GET` | `/api/parcels/assigned-parcels` | `Paginated<Parcel>` — active queue |
 | DELIVERY_PERSONNEL | `GET` | `/api/parcels/completed-deliveries` | `Paginated<Parcel>` — by `updatedAt` desc |
+
+> **Receiver routes are scoped by who the parcel is addressed to, not by
+> role.** A parcel can be addressed to a sender or courier account, so
+> `incoming-parcels`, `delivery-history` and `confirm` accept any signed-in
+> user and answer only for parcels whose receiver is the caller.
+
+> **Becoming `DELIVERED`.** Three routes can close a parcel — `status`,
+> `confirm` and `delivery-proof` — and all three stamp `deliveredAt`. A
+> parcel with `codAmount > 0` is refused by `status` and `confirm` (`400`)
+> until `delivery-proof` has recorded `codCollected: true`.
+
+> **Blocked parcels are frozen.** `status`, `assign`, `cancel`, `confirm`
+> and `delivery-proof` all answer `400 Parcel is blocked` until an admin
+> calls `unblock`.
+
+> **Cancelling.** The sender's `cancel` works only while the parcel is
+> `PENDING`. After pickup an admin cancels it through `status`.
 
 > **Authenticated routes** return the full `Parcel`. Nested users
 > (`sender`, `receiver`, `deliveryPersonnel`, `statusLogs[].changedBy`) come
@@ -266,7 +292,7 @@ them to `SENDER` so the account stays usable and they can apply again.
 | Trigger | Recipient |
 | --- | --- |
 | Account created | Confirmation link |
-| Parcel created for an unregistered receiver | Claim-your-account link (a reset grant — they have no password yet) |
+| Parcel created for an unregistered receiver | Claim-your-account link (a reset grant, valid 7 days — they have no password yet) |
 | Parcel reaches `PICKED_UP`, `OUT_FOR_DELIVERY`, `DELIVERED` or `CANCELLED` | Sender and receiver |
 | `forgot-password` | Reset link, 30 min, single use |
 
@@ -379,8 +405,19 @@ Exactly one `done` or `{"type":"error","message":string}` terminates the stream.
 Errors arrive as events rather than an HTTP status, because the headers have
 already been sent by then. Closing the connection stops token generation.
 
-> Index-mutating routes are admin-only. `ask` needs any signed-in user rather
-> than being public, because each call bills an embedding and a completion.
+> Index-mutating routes are admin-only. `ask` and `ask/stream` need any
+> signed-in user rather than being public, because each call bills an
+> embedding and a completion.
+
+> **Answers are scoped to the caller.** Policy PDFs are searchable by everyone.
+> Parcels are only retrieved for an admin, or for the parcel's sender, receiver
+> or courier. `index/parcel` and `index/bulk` accept optional `senderId`,
+> `receiverId` and `courierId`; a parcel indexed without them is visible to
+> admins alone.
+
+> Without `PINECONE_API_KEY`, `PINECONE_INDEX`, `HUGGINGFACE_API_KEY` and
+> `GROQ_API_KEY` the assistant is switched off: both ask routes answer `503`
+> and the rest of the API runs normally.
 
 ## Contact
 
@@ -397,7 +434,7 @@ Body: `{ name, email, topic, trackingId?, message }`, where `topic` is one of
 | Role | Method | Endpoint | Response |
 | --- | --- | --- | --- |
 | Public | `GET` | `/api` | `"Hello World!"` (plain text) |
-| Cron | `GET` | `/api/keep-alive` | `{ ok: true, at: string }` |
+| Cron | `GET` | `/api/keep-alive` | `{ ok: true, at: string, pruned: number }` — also deletes expired token rows |
 
 `keep-alive` is for the Vercel cron and expects
 `Authorization: Bearer <CRON_SECRET>` — not a user JWT. Not for frontend use.
@@ -414,10 +451,13 @@ Standard Nest error envelope on every failure:
 
 | Code | When |
 | --- | --- |
-| `400` | Failed validation, illegal parcel status transition, blocked/inactive account at login, expired reset token |
-| `401` | Missing, malformed, or expired token; wrong password |
+| `400` | Failed validation, illegal parcel status transition, blocked parcel, uncollected cash on delivery, expired reset token |
+| `401` | Missing, malformed, or expired token; wrong password; blocked or deleted account (login, refresh and every guarded route) |
 | `403` | Wrong role for the route; a courier touching a parcel that is not theirs, or setting a status couriers may not set |
 | `404` | No such user or tracking id |
+| `409` | Email or national id already in use |
+| `429` | Rate limit: 120/min per route by default, 8/min on credential routes, 20/min on the assistant |
+| `503` | Assistant not configured |
 | `409` | Email already registered |
 | `429` | Rate limit hit — 120 req/min generally, 8/min on auth routes, 20/min on AI routes |
 

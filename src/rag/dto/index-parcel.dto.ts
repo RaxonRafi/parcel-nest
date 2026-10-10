@@ -47,4 +47,23 @@ export class IndexParcelDto {
   @IsString()
   @MaxLength(500)
   notes?: string;
+
+  @ApiPropertyOptional({
+    format: 'uuid',
+    description:
+      'Sender, receiver and courier ids. Non-admin users are only shown parcels that name them here, so a parcel indexed without them is visible to admins alone.',
+  })
+  @IsOptional()
+  @IsUUID('4')
+  senderId?: string;
+
+  @ApiPropertyOptional({ format: 'uuid' })
+  @IsOptional()
+  @IsUUID('4')
+  receiverId?: string;
+
+  @ApiPropertyOptional({ format: 'uuid' })
+  @IsOptional()
+  @IsUUID('4')
+  courierId?: string;
 }
