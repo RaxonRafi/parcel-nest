@@ -21,36 +21,36 @@ import { AuditAction, AuditTargetType } from '../types/audit.types';
 @Entity('audit_logs')
 export class AuditLog {
   @PrimaryGeneratedColumn('uuid')
-  id: string;
+  id!: string;
 
   @ManyToOne(() => User, { nullable: true, onDelete: 'SET NULL' })
   @JoinColumn({ name: 'actorId' })
-  actor: User | null;
+  actor!: User | null;
 
   /** Kept alongside the relation so the trail survives the account. */
   @Column({ type: 'varchar', length: 255, nullable: true })
-  actorEmail: string | null;
+  actorEmail!: string | null;
 
   @Index()
   @Column({ type: 'varchar', length: 48 })
-  action: AuditAction;
+  action!: AuditAction;
 
   @Column({ type: 'varchar', length: 16 })
-  targetType: AuditTargetType;
+  targetType!: AuditTargetType;
 
   @Index()
   @Column({ type: 'varchar', length: 64 })
-  targetId: string;
+  targetId!: string;
 
   /** Human-readable summary, so a log line is legible without joins. */
   @Column({ type: 'text', nullable: true })
-  summary: string | null;
+  summary!: string | null;
 
   /** Before/after values and anything else worth keeping. */
   @Column({ type: 'jsonb', nullable: true })
-  metadata: Record<string, unknown> | null;
+  metadata!: Record<string, unknown> | null;
 
   @Index()
   @CreateDateColumn({ type: 'timestamptz' })
-  createdAt: Date;
+  createdAt!: Date;
 }

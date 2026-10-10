@@ -1,6 +1,6 @@
 import { Parcel } from '../entities/parcel.entity';
 import { ParcelStatus } from '../types/parcel.types';
-import { toPublicParcel } from './public-parcel.util';
+import { maskName, toArea, toPublicParcel } from './public-parcel.util';
 
 describe('toPublicParcel', () => {
   const buildParcel = (overrides: Partial<Parcel> = {}): Parcel =>
@@ -13,8 +13,8 @@ describe('toPublicParcel', () => {
       receiverName: 'Jane Doe',
       senderPhone: '+880170000000',
       receiverPhone: '+880180000000',
-      pickupAddress: 'Dhaka',
-      deliveryAddress: 'Chattogram',
+      pickupAddress: 'House 12, Road 5, Gulshan, Dhaka',
+      deliveryAddress: '45 Agrabad, Chattogram',
       description: null,
       sender: { id: 's', email: 's@x.com', nidNumber: '123' },
       receiver: { id: 'r', email: 'r@x.com', nidNumber: '456' },
@@ -65,6 +65,38 @@ describe('toPublicParcel', () => {
     expect(view.deliveryPersonnelName).toBeNull();
   });
 
+  it('shows the area, never the door', () => {
+    const view = toPublicParcel(buildParcel());
+
+    expect(view.pickupAddress).toBe('Gulshan, Dhaka');
+    expect(view.deliveryAddress).toBe('Chattogram');
+    expect(JSON.stringify(view)).not.toContain('House 12');
+    expect(JSON.stringify(view)).not.toContain('45 Agrabad');
+  });
+
+  it('shows who, but not their full name', () => {
+    const view = toPublicParcel(buildParcel());
+
+    expect(view.senderName).toBe('John S.');
+    expect(view.receiverName).toBe('Jane D.');
+  });
+
+  it('does not let the handover note name whoever signed', () => {
+    const view = toPublicParcel(
+      buildParcel({
+        statusLogs: [
+          {
+            status: ParcelStatus.DELIVERED,
+            note: 'Delivered to Rahim Uddin',
+            createdAt: new Date('2026-01-03'),
+          },
+        ] as unknown as Parcel['statusLogs'],
+      }),
+    );
+
+    expect(view.statusLogs[0].note).toBe('Delivered');
+  });
+
   it('keeps the tracking essentials', () => {
     const view = toPublicParcel(buildParcel());
 
@@ -80,5 +112,40 @@ describe('toPublicParcel', () => {
     );
 
     expect(view.statusLogs).toEqual([]);
+  });
+});
+
+describe('toArea', () => {
+  it.each([
+    ['House 12, Road 5, Gulshan, Dhaka', 'Gulshan, Dhaka'],
+    ['45 Agrabad, Chattogram', 'Chattogram'],
+    ['Flat 4B\nBanani\nDhaka', 'Banani, Dhaka'],
+    ['House 12 Road 5 Dhanmondi Dhaka', 'Dhanmondi Dhaka'],
+    ['Dhaka', 'Dhaka'],
+    ['Cox Bazar', 'Cox Bazar'],
+    ['  ,  ', ''],
+    ['', ''],
+  ])('%p → %p', (address, area) => {
+    expect(toArea(address)).toBe(area);
+  });
+
+  it('copes with a missing address', () => {
+    expect(toArea(null)).toBe('');
+    expect(toArea(undefined)).toBe('');
+  });
+});
+
+describe('maskName', () => {
+  it.each([
+    ['Jane Doe', 'Jane D.'],
+    ['  jane   van  doe ', 'jane D.'],
+    ['Madonna', 'Madonna'],
+    ['', ''],
+  ])('%p → %p', (name, masked) => {
+    expect(maskName(name)).toBe(masked);
+  });
+
+  it('copes with a missing name', () => {
+    expect(maskName(null)).toBe('');
   });
 });

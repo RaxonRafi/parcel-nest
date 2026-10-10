@@ -1,4 +1,4 @@
-import { BadRequestException, Injectable, Logger } from '@nestjs/common';
+import { BadRequestException, Injectable } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { InjectRepository } from '@nestjs/typeorm';
 import { randomBytes } from 'crypto';
@@ -22,8 +22,6 @@ const CLAIM_EXPIRY_DAYS = 7;
 /** Sole owner of the `password_resets` table. */
 @Injectable()
 export class PasswordResetService {
-  private readonly logger = new Logger(PasswordResetService.name);
-
   constructor(
     @InjectRepository(PasswordReset)
     private readonly resetRepository: Repository<PasswordReset>,
@@ -40,23 +38,17 @@ export class PasswordResetService {
     const url = `${webBaseUrl(this.config)}/reset-password?token=${token}`;
     const { html, text } = passwordResetEmail(user.name, url, EXPIRY_MINUTES);
 
-    try {
-      await this.mailService.send(
-        user.email,
-        'Reset your Parcel Delivery password',
-        html,
-        text,
-      );
-    } catch (error) {
-      // Swallowed deliberately. If a delivery failure escaped, `forgot-password`
-      // would 500 for registered addresses while unknown ones returned 200 —
-      // handing back exactly the account-enumeration signal the generic
-      // response exists to hide. Operators find these in the logs instead.
-      const message = error instanceof Error ? error.message : 'Unknown error';
-      this.logger.error(
-        `Password reset email to ${user.email} could not be sent: ${message}`,
-      );
-    }
+    // Queued, so a delivery failure can neither fail nor slow the request.
+    // That matters twice over here: if `forgot-password` answered 500 (or
+    // just more slowly) for registered addresses while unknown ones returned
+    // 200 at once, it would hand back exactly the account-enumeration signal
+    // the generic response exists to hide. Operators find failures in the logs.
+    this.mailService.queue(
+      user.email,
+      'Reset your Parcel Delivery password',
+      html,
+      text,
+    );
   }
 
   /**
@@ -79,14 +71,7 @@ export class PasswordResetService {
       `${CLAIM_EXPIRY_DAYS} days`,
     );
 
-    try {
-      await this.mailService.send(user.email, subject, html, text);
-    } catch (error) {
-      const message = error instanceof Error ? error.message : 'Unknown error';
-      this.logger.error(
-        `Claim-account email to ${user.email} could not be sent: ${message}`,
-      );
-    }
+    this.mailService.queue(user.email, subject, html, text);
   }
 
   /**

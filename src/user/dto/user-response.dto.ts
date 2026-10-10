@@ -51,6 +51,12 @@ export class UserResponseDto {
   @ApiProperty({ type: [String] })
   nidImage!: string[];
 
+  @ApiProperty({
+    default: true,
+    description: 'Whether parcel update emails are sent to this account.',
+  })
+  emailNotifications!: boolean;
+
   @ApiPropertyOptional({ type: [AuthProviderResponseDto] })
   auths?: AuthProviderResponseDto[];
 

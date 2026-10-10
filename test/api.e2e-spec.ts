@@ -83,8 +83,17 @@ describe('API (e2e)', () => {
       .set(authHeader(token))
       .send({ status });
 
+  /** A parcel cannot be picked up until someone is answerable for it. */
+  const assignCourier = (trackingId: string) =>
+    request(server)
+      .patch(`/api/parcels/${trackingId}/assign`)
+      .set(authHeader(users.admin.token))
+      .send({ deliveryPersonnelId: users.courier.user.id })
+      .expect(200);
+
   /** Walks a parcel from PENDING to IN_TRANSIT as an admin. */
   const dispatch = async (trackingId: string): Promise<void> => {
+    await assignCourier(trackingId);
     await setStatus(
       trackingId,
       ParcelStatus.PICKED_UP,
@@ -480,6 +489,7 @@ describe('API (e2e)', () => {
 
       it('is refused for the sender after pickup, but open to an admin', async () => {
         const trackingId = await bookParcel();
+        await assignCourier(trackingId);
         await setStatus(
           trackingId,
           ParcelStatus.PICKED_UP,
@@ -534,6 +544,7 @@ describe('API (e2e)', () => {
           .expect(200);
         expect((res.body as ParcelBody).isBlocked).toBe(false);
 
+        await assignCourier(trackingId);
         await setStatus(
           trackingId,
           ParcelStatus.PICKED_UP,

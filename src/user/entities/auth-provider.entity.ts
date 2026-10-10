@@ -11,15 +11,15 @@ import { AuthProviderType } from '../types/user.types';
 @Entity('auth_providers')
 export class AuthProvider {
   @PrimaryGeneratedColumn('uuid')
-  id: string;
+  id!: string;
 
   @Column({ type: 'varchar', length: 32 })
-  provider: AuthProviderType;
+  provider!: AuthProviderType;
 
   @Column()
-  providerId: string;
+  providerId!: string;
 
   @ManyToOne(() => User, (user) => user.auths, { onDelete: 'CASCADE' })
   @JoinColumn({ name: 'userId' })
-  user: User;
+  user!: User;
 }

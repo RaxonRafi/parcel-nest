@@ -3,6 +3,7 @@ import { TypeOrmModule } from '@nestjs/typeorm';
 import { AuditRecorderModule } from '../audit/audit-recorder.module';
 import { AccountTokensModule } from '../auth/account-tokens.module';
 import { AccessControlModule } from '../common/access-control.module';
+import { NotificationStoreModule } from '../notification/notification-store.module';
 import { RagModule } from '../rag/rag.module';
 import { RealtimeModule } from '../realtime/realtime.module';
 import { ParcelController } from './controllers/parcel.controller';
@@ -21,6 +22,7 @@ import { ParcelService } from './services/parcel.service';
     // depend on ParcelModule, so this import introduces no cycle.
     RagModule,
     RealtimeModule,
+    NotificationStoreModule,
   ],
   controllers: [ParcelController],
   providers: [ParcelService, ParcelNotificationService],

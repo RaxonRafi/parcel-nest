@@ -65,8 +65,10 @@ export interface PublicParcel {
   trackingId: string;
   status: ParcelStatus;
   isBlocked: boolean;
+  /** First name and last initial — "Jane D.". */
   senderName: string;
   receiverName: string;
+  /** The area only — "Gulshan, Dhaka" — never the street address. */
   pickupAddress: string;
   deliveryAddress: string;
   description: string | null;

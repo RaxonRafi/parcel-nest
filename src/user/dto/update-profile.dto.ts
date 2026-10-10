@@ -2,6 +2,7 @@ import { ApiPropertyOptional } from '@nestjs/swagger';
 import { Transform } from 'class-transformer';
 import {
   IsArray,
+  IsBoolean,
   IsNotEmpty,
   IsOptional,
   IsString,
@@ -54,4 +55,12 @@ export class UpdateProfileDto {
   @IsArray()
   @IsUrl({}, { each: true, message: 'each nidImage must be a valid URL' })
   nidImage?: string[];
+
+  @ApiPropertyOptional({
+    description:
+      'Parcel update emails (picked up, out for delivery, delivered, cancelled). Account and security emails are sent regardless.',
+  })
+  @IsOptional()
+  @IsBoolean()
+  emailNotifications?: boolean;
 }

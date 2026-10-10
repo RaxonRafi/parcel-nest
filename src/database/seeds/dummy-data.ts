@@ -192,8 +192,15 @@ export function buildParcels(
     const needsCourier = status !== 'PENDING' && status !== 'CANCELLED';
     const courier = needsCourier ? pick(couriers) : null;
 
+    // A parcel's history must already have happened. A delivery takes up to
+    // four days and any other trail up to three, so a parcel is booked at
+    // least that long ago — otherwise the seed writes deliveries and status
+    // changes dated in the future, which no chart ending today can show.
+    const minAgeDays = status === 'DELIVERED' ? 5 : status === 'PENDING' ? 0 : 4;
     const createdAt = new Date(
-      Date.now() - between(0, WINDOW_DAYS) * DAY - between(0, 23) * 3_600_000,
+      Date.now() -
+        between(minAgeDays, WINDOW_DAYS) * DAY -
+        between(0, 23) * 3_600_000,
     );
     // Delivered parcels take somewhere between a few hours and four days.
     const deliveredAt =

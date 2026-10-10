@@ -13,22 +13,22 @@ import { User } from '../../user/entities/user.entity';
 @Entity('email_verifications')
 export class EmailVerification {
   @PrimaryGeneratedColumn('uuid')
-  id: string;
+  id!: string;
 
   @ManyToOne(() => User, { onDelete: 'CASCADE' })
   @JoinColumn({ name: 'userId' })
-  user: User;
+  user!: User;
 
   @Index()
   @Column({ type: 'varchar', length: 64 })
-  tokenHash: string;
+  tokenHash!: string;
 
   @Column({ type: 'timestamptz' })
-  expiresAt: Date;
+  expiresAt!: Date;
 
   @Column({ type: 'timestamptz', nullable: true })
-  usedAt: Date | null;
+  usedAt!: Date | null;
 
   @CreateDateColumn({ type: 'timestamptz' })
-  createdAt: Date;
+  createdAt!: Date;
 }

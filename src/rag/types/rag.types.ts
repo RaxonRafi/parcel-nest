@@ -2,6 +2,12 @@ import { Role } from '../../user/types/user.types';
 
 export type RagFilter = 'pdf' | 'parcel' | 'all';
 
+/** One earlier message in the conversation a question belongs to. */
+export interface RagTurn {
+  role: 'user' | 'assistant';
+  content: string;
+}
+
 /** Who is asking — decides which parcels retrieval is allowed to return. */
 export interface RagViewer {
   id: string;

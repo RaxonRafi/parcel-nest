@@ -1,8 +1,21 @@
-import { ServiceUnavailableException } from '@nestjs/common';
+import {
+  BadRequestException,
+  Logger,
+  ServiceUnavailableException,
+} from '@nestjs/common';
+import { mkdtemp, rm, writeFile } from 'fs/promises';
+import { tmpdir } from 'os';
+import { join } from 'path';
 import { Test, TestingModule } from '@nestjs/testing';
 import { ConfigService } from '@nestjs/config';
 import { Role } from '../../user/types/user.types';
-import { buildRetrievalFilter, isSmallTalk, RagService } from './rag.service';
+import {
+  buildRetrievalFilter,
+  isSmallTalk,
+  NO_INFORMATION,
+  RagService,
+  retrievalQuery,
+} from './rag.service';
 
 describe('RagService', () => {
   let service: RagService;
@@ -101,6 +114,159 @@ describe('RagService — parcel indexing', () => {
     // Pinecone rejects null metadata, so an absent party has no key at all.
     expect(docs[1].metadata).not.toHaveProperty('receiver_id');
     expect(docs[1].metadata).not.toHaveProperty('courier_id');
+  });
+});
+
+/** A service switched on, with the providers replaced by stubs. */
+function enabledService() {
+  const service = new RagService({} as ConfigService);
+  const retrieve = jest.fn().mockResolvedValue([]);
+  const index = { listPaginated: jest.fn(), deleteMany: jest.fn() };
+  const internals = service as unknown as {
+    vectorStore: unknown;
+    pineconeIndex: unknown;
+    llm: unknown;
+  };
+
+  internals.vectorStore = {
+    asRetriever: () => ({ invoke: retrieve }),
+    addDocuments: jest.fn(),
+    delete: jest.fn(),
+  };
+  internals.pineconeIndex = index;
+  // Reaching the model in these tests would be the bug under test.
+  internals.llm = {
+    invoke: () => {
+      throw new Error('the model must not be called');
+    },
+  };
+
+  return { service, retrieve, index };
+}
+
+describe('RagService — asking', () => {
+  const viewer = { id: 'user-1', role: Role.SENDER };
+
+  it('answers "no information" itself when retrieval finds nothing', async () => {
+    const { service } = enabledService();
+
+    await expect(
+      service.ask('Where is TRK-DOES-NOT-EXIST?', viewer),
+    ).resolves.toEqual({ answer: NO_INFORMATION, sources: [] });
+  });
+
+  it('streams the same answer as one token, then finishes', async () => {
+    const { service } = enabledService();
+    const chunks: unknown[] = [];
+
+    for await (const chunk of service.askStream('Where is it?', viewer)) {
+      chunks.push(chunk);
+    }
+
+    expect(chunks).toEqual([
+      { type: 'sources', sources: [] },
+      { type: 'token', token: NO_INFORMATION },
+      { type: 'done' },
+    ]);
+  });
+
+  it('searches with the previous question too, so a follow-up finds its subject', async () => {
+    const { service, retrieve } = enabledService();
+
+    await service.ask('and when will it arrive?', viewer, 'all', [
+      { role: 'user', content: 'Where is TRK-7K2M9QX4T1VB?' },
+      { role: 'assistant', content: 'It is in transit.' },
+    ]);
+
+    expect(retrieve).toHaveBeenCalledWith(
+      'Where is TRK-7K2M9QX4T1VB?\nand when will it arrive?',
+    );
+  });
+});
+
+describe('retrievalQuery', () => {
+  it('is just the question when there is no history', () => {
+    expect(retrievalQuery('Where is it?', [])).toBe('Where is it?');
+  });
+
+  it('uses the most recent thing the user asked, not what the assistant said', () => {
+    expect(
+      retrievalQuery('and the fee?', [
+        { role: 'user', content: 'first question' },
+        { role: 'assistant', content: 'first answer' },
+        { role: 'user', content: 'second question' },
+        { role: 'assistant', content: 'second answer' },
+      ]),
+    ).toBe('second question\nand the fee?');
+  });
+});
+
+describe('RagService — uploads', () => {
+  let dir: string;
+
+  beforeAll(async () => {
+    dir = await mkdtemp(join(tmpdir(), 'rag-spec-'));
+  });
+
+  afterAll(async () => {
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  it('refuses a file that only claims to be a PDF', async () => {
+    const { service } = enabledService();
+    const fake = join(dir, 'invoice.pdf');
+    await writeFile(fake, '<html><script>alert(1)</script></html>');
+
+    await expect(
+      service.ingestPDF(fake, { source: 'invoice.pdf', category: 'general' }),
+    ).rejects.toBeInstanceOf(BadRequestException);
+  });
+
+  it('refuses an empty file', async () => {
+    const { service } = enabledService();
+    const empty = join(dir, 'empty.pdf');
+    await writeFile(empty, '');
+
+    await expect(
+      service.ingestPDF(empty, { source: 'empty.pdf', category: 'general' }),
+    ).rejects.toThrow('That file is not a PDF');
+  });
+});
+
+describe('RagService — pruning stale parcels', () => {
+  it('deletes the vectors whose parcel is gone and keeps the rest', async () => {
+    const { service, index } = enabledService();
+    index.listPaginated
+      .mockResolvedValueOnce({
+        vectors: [{ id: 'parcel-a' }, { id: 'parcel-gone-1' }],
+        pagination: { next: 'page-2' },
+      })
+      .mockResolvedValueOnce({
+        vectors: [{ id: 'parcel-gone-2' }, { id: 'parcel-b' }],
+      });
+
+    await expect(
+      service.pruneParcelsExcept(new Set(['a', 'b'])),
+    ).resolves.toBe(2);
+
+    expect(index.listPaginated).toHaveBeenNthCalledWith(2, {
+      prefix: 'parcel-',
+      paginationToken: 'page-2',
+    });
+    expect(index.deleteMany.mock.calls).toEqual([
+      [['parcel-gone-1']],
+      [['parcel-gone-2']],
+    ]);
+  });
+
+  it('gives up quietly on an index that cannot list by prefix', async () => {
+    const warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation();
+    const { service, index } = enabledService();
+    index.listPaginated.mockRejectedValue(new Error('not supported'));
+
+    await expect(service.pruneParcelsExcept(new Set())).resolves.toBe(0);
+    expect(index.deleteMany).not.toHaveBeenCalled();
+    warn.mockRestore();
   });
 });
 

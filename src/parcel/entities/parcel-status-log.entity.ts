@@ -13,24 +13,24 @@ import { ParcelStatus } from '../types/parcel.types';
 @Entity('parcel_status_logs')
 export class ParcelStatusLog {
   @PrimaryGeneratedColumn('uuid')
-  id: string;
+  id!: string;
 
   @ManyToOne(() => Parcel, (parcel) => parcel.statusLogs, {
     onDelete: 'CASCADE',
   })
   @JoinColumn({ name: 'parcelId' })
-  parcel: Parcel;
+  parcel!: Parcel;
 
   @Column({ type: 'varchar', length: 32 })
-  status: ParcelStatus;
+  status!: ParcelStatus;
 
   @Column({ type: 'text', nullable: true })
-  note: string;
+  note!: string;
 
   @ManyToOne(() => User, { nullable: true, onDelete: 'SET NULL' })
   @JoinColumn({ name: 'changedById' })
-  changedBy: User;
+  changedBy!: User;
 
   @CreateDateColumn({ type: 'timestamptz' })
-  createdAt: Date;
+  createdAt!: Date;
 }

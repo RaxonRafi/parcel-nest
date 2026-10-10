@@ -20,7 +20,9 @@ import {
   Repository,
 } from 'typeorm';
 import { ConfigService } from '@nestjs/config';
+import { BackgroundService } from '../../common/background/background.service';
 import { Paginated, paginate } from '../../common/types/paginated.type';
+import { escapeLike } from '../../common/utils/like.util';
 import {
   CourierThroughput,
   DailyCount,
@@ -36,10 +38,15 @@ import { Role } from '../../user/types/user.types';
 import { CreateParcelDto } from '../dto/create-parcel.dto';
 import { DeliveryProofDto } from '../dto/delivery-proof.dto';
 import { QueryParcelsDto } from '../dto/query-parcels.dto';
+import { QuoteParcelDto } from '../dto/quote-parcel.dto';
 import { UpdateParcelStatusDto } from '../dto/update-parcel-status.dto';
 import { ParcelStatusLog } from '../entities/parcel-status-log.entity';
 import { Parcel } from '../entities/parcel.entity';
-import { calculateDeliveryFee, ratesFromEnv } from '../utils/pricing.util';
+import {
+  calculateDeliveryFee,
+  FeeBreakdown,
+  ratesFromEnv,
+} from '../utils/pricing.util';
 import { toPublicParcel } from '../utils/public-parcel.util';
 import { AuditService } from '../../audit/services/audit.service';
 import { AuditAction, AuditTargetType } from '../../audit/types/audit.types';
@@ -61,6 +68,14 @@ const PARCEL_RELATIONS = [
   'statusLogs',
   'statusLogs.changedBy',
 ];
+
+/**
+ * Lists leave the timeline out. Loading `statusLogs` and each entry's author
+ * cost two extra joins and multiplied the rows by the length of every
+ * parcel's history, for data a list row does not show; the detail route
+ * loads it for the one parcel being looked at.
+ */
+const LIST_RELATIONS = ['sender', 'receiver', 'deliveryPersonnel'];
 
 /**
  * Statuses a courier may set on a parcel assigned to them. Cancelling stays
@@ -107,12 +122,24 @@ export class ParcelService {
     private readonly config: ConfigService,
     private readonly passwordResetService: PasswordResetService,
     private readonly auditService: AuditService,
+    private readonly background: BackgroundService,
   ) {}
+
+  /** What a parcel of this weight and cash amount would cost to send. */
+  quote(payload: QuoteParcelDto): FeeBreakdown {
+    return calculateDeliveryFee(
+      payload.weightKg ?? 1,
+      payload.codAmount ?? 0,
+      ratesFromEnv((key) => this.config.get<string>(key)),
+    );
+  }
 
   async create(sender: User, payload: CreateParcelDto): Promise<Parcel> {
     if (sender.role !== Role.SENDER && sender.role !== Role.ADMIN) {
       throw new ForbiddenException('Only senders can create parcels');
     }
+
+    this.userService.assertEmailVerified(sender, 'booking a parcel');
 
     const { user: receiver, created: receiverIsNew } =
       await this.resolveReceiver(payload);
@@ -124,11 +151,7 @@ export class ParcelService {
     const weightKg = payload.weightKg ?? 1;
     const codAmount = payload.codAmount ?? 0;
     // Priced here, never taken from the request.
-    const { total: deliveryFee } = calculateDeliveryFee(
-      weightKg,
-      codAmount,
-      ratesFromEnv((key) => this.config.get<string>(key)),
-    );
+    const feeBreakdown = this.quote({ weightKg, codAmount });
 
     const parcel = this.parcelRepository.create({
       trackingId: await this.generateTrackingId(),
@@ -143,7 +166,8 @@ export class ParcelService {
       description: payload.description,
       weightKg,
       codAmount,
-      deliveryFee,
+      deliveryFee: feeBreakdown.total,
+      feeBreakdown,
       status: ParcelStatus.PENDING,
       statusLogs: [
         {
@@ -155,10 +179,22 @@ export class ParcelService {
     });
 
     const savedParcel = await this.parcelRepository.save(parcel);
-    const freshParcel = await this.getParcelWithLogs(savedParcel.trackingId);
-    await this.triggerParcelIndex(freshParcel);
-    // PENDING sends no email; this only reaches connected dashboards.
-    await this.notifications.notifyStatusChange(freshParcel);
+    await this.auditService.record({
+      actor: sender,
+      action: AuditAction.PARCEL_CREATED,
+      targetType: AuditTargetType.PARCEL,
+      targetId: savedParcel.trackingId,
+      summary: `Booked for ${receiver.email}`,
+      metadata: {
+        receiverId: receiver.id,
+        weightKg,
+        codAmount,
+        deliveryFee: feeBreakdown.total,
+      },
+    });
+
+    // PENDING sends no email; the notification only reaches dashboards.
+    const freshParcel = await this.announce(savedParcel.trackingId);
 
     if (receiverIsNew) {
       // The account was created for them; they have no password yet.
@@ -193,6 +229,14 @@ export class ParcelService {
 
     this.assertTransitionAllowed(parcel.status, payload.status);
 
+    // A parcel cannot have been collected by nobody. Without this an admin
+    // could mark it picked up and leave no courier answerable for it.
+    if (payload.status === ParcelStatus.PICKED_UP && !parcel.deliveryPersonnel) {
+      throw new BadRequestException(
+        'Assign a courier before marking this parcel as picked up',
+      );
+    }
+
     const from = parcel.status;
     if (payload.status === ParcelStatus.DELIVERED) {
       this.markDelivered(parcel);
@@ -213,7 +257,7 @@ export class ParcelService {
       metadata: { from, to: payload.status, note: payload.note ?? null },
     });
 
-    return this.refreshAndIndex(trackingId);
+    return this.announce(trackingId);
   }
 
   /**
@@ -257,7 +301,7 @@ export class ParcelService {
       metadata: { courierId: courier.id, courierEmail: courier.email },
     });
 
-    return this.refreshAndIndex(trackingId);
+    return this.announce(trackingId);
   }
 
   /** Removes the courier without changing the parcel's status. */
@@ -288,7 +332,7 @@ export class ParcelService {
       metadata: { courierId: previousCourier.id },
     });
 
-    return this.refreshAndIndex(trackingId);
+    return this.announce(trackingId);
   }
 
   /** Everything currently on a courier's plate — closed parcels excluded. */
@@ -317,6 +361,11 @@ export class ParcelService {
     );
   }
 
+  /**
+   * The booker pulling their own parcel back — a sender, or an admin for a
+   * parcel they booked themselves. An admin cancelling someone else's parcel
+   * is a different act and goes through the status route.
+   */
   async cancelParcel(trackingId: string, sender: User): Promise<Parcel> {
     const parcel = await this.findByTrackingIdOrFail(trackingId);
 
@@ -341,8 +390,15 @@ export class ParcelService {
       actor: sender,
       note: 'Cancelled by sender',
     });
+    await this.auditService.record({
+      actor: sender,
+      action: AuditAction.PARCEL_CANCELLED,
+      targetType: AuditTargetType.PARCEL,
+      targetId: parcel.trackingId,
+      summary: 'Cancelled by its sender before pickup',
+    });
 
-    return this.refreshAndIndex(trackingId);
+    return this.announce(trackingId);
   }
 
   async confirmDelivery(trackingId: string, receiver: User): Promise<Parcel> {
@@ -361,8 +417,15 @@ export class ParcelService {
       actor: receiver,
       note: 'Delivery confirmed by receiver',
     });
+    await this.auditService.record({
+      actor: receiver,
+      action: AuditAction.PARCEL_DELIVERY_CONFIRMED,
+      targetType: AuditTargetType.PARCEL,
+      targetId: parcel.trackingId,
+      summary: 'Receiver confirmed delivery',
+    });
 
-    return this.refreshAndIndex(trackingId);
+    return this.announce(trackingId);
   }
 
   async blockParcel(trackingId: string, admin: User): Promise<Parcel> {
@@ -405,7 +468,7 @@ export class ParcelService {
       metadata: { status: parcel.status },
     });
 
-    return this.refreshAndIndex(trackingId);
+    return this.announce(trackingId);
   }
 
   async getMyParcels(
@@ -497,8 +560,46 @@ export class ParcelService {
           ? 'Proof of delivery added'
           : `Delivered to ${parcel.receivedBy}`),
     });
+    await this.auditService.record({
+      actor,
+      action: AuditAction.PARCEL_PROOF_SUBMITTED,
+      targetType: AuditTargetType.PARCEL,
+      targetId: parcel.trackingId,
+      summary: alreadyDelivered
+        ? 'Proof added to a delivered parcel'
+        : `Delivered to ${parcel.receivedBy}`,
+      metadata: {
+        images: payload.images.length,
+        receivedBy: parcel.receivedBy,
+        codAmount: parcel.codAmount,
+        codCollected: parcel.isCodCollected,
+      },
+    });
 
-    return this.refreshAndIndex(trackingId);
+    return this.announce(trackingId);
+  }
+
+  /**
+   * The whole parcel — contact details, proof, fee breakdown and timeline —
+   * for the people it concerns: an admin, or its sender, receiver or courier.
+   * Everyone else gets the trimmed public view from `getByTrackingId`.
+   */
+  async getDetails(trackingId: string, viewer: User): Promise<Parcel> {
+    const parcel = await this.getParcelWithLogs(trackingId);
+
+    const isParty = [
+      parcel.sender?.id,
+      parcel.receiver?.id,
+      parcel.deliveryPersonnel?.id,
+    ].includes(viewer.id);
+
+    if (viewer.role !== Role.ADMIN && !isParty) {
+      throw new ForbiddenException(
+        'You can only open parcels you sent, are receiving, or are delivering',
+      );
+    }
+
+    return parcel;
   }
 
   /**
@@ -773,16 +874,14 @@ export class ParcelService {
     // `find` ORs an array of conditions, which is how one search term can match
     // any of three columns while every other filter still applies.
     const searchable = ['trackingId', 'senderName', 'receiverName'];
-    const where = query.search
-      ? searchable.map((field) => ({
-          ...filters,
-          [field]: ILike(`%${query.search}%`),
-        }))
+    const term = query.search ? `%${escapeLike(query.search)}%` : null;
+    const where = term
+      ? searchable.map((field) => ({ ...filters, [field]: ILike(term) }))
       : filters;
 
     const [data, total] = await this.parcelRepository.findAndCount({
       where: where as never,
-      relations: PARCEL_RELATIONS,
+      relations: LIST_RELATIONS,
       order: { [orderBy]: 'DESC' },
       skip: query.skip,
       take: query.limit,
@@ -871,15 +970,25 @@ export class ParcelService {
   }
 
   /**
-   * Single exit point for every mutation: re-read with relations, re-index for
-   * search, and email whoever cares. Both side effects swallow their own
-   * failures so neither can undo a committed write.
+   * Single exit point for every mutation: re-read with relations, then
+   * re-index for the assistant and tell whoever cares.
+   *
+   * Neither side effect is awaited. Together they are an embedding call, a
+   * vector upsert, a few inserts and up to two SMTP round trips — seconds of
+   * work the caller has no use for, since the write is already committed and
+   * neither can undo it. They run behind the response instead.
    */
-  private async refreshAndIndex(trackingId: string): Promise<Parcel> {
-    const updatedParcel = await this.getParcelWithLogs(trackingId);
-    await this.triggerParcelIndex(updatedParcel);
-    await this.notifications.notifyStatusChange(updatedParcel);
-    return updatedParcel;
+  private async announce(trackingId: string): Promise<Parcel> {
+    const parcel = await this.getParcelWithLogs(trackingId);
+
+    this.background.run(`Indexing ${trackingId}`, () =>
+      this.ragService.indexParcel(this.toIndexDocument(parcel)),
+    );
+    this.background.run(`Notifying about ${trackingId}`, () =>
+      this.notifications.notifyStatusChange(parcel),
+    );
+
+    return parcel;
   }
 
   private async findByTrackingIdOrFail(trackingId: string): Promise<Parcel> {
@@ -922,11 +1031,12 @@ export class ParcelService {
    * Paged by id so memory stays flat and a parcel created mid-run cannot shift
    * the pages; each page is one embedding call.
    */
-  async reindexAll(): Promise<{ indexed: number }> {
+  async reindexAll(): Promise<{ indexed: number; removed: number }> {
     this.ragService.assertAvailable();
 
     let indexed = 0;
     let lastId: string | undefined;
+    const ids = new Set<string>();
 
     for (;;) {
       const page = await this.parcelRepository.find({
@@ -948,28 +1058,16 @@ export class ParcelService {
 
       indexed += page.length;
       lastId = page[page.length - 1].id;
+      for (const parcel of page) ids.add(parcel.id);
     }
 
-    this.logger.log(`Re-indexed ${indexed} parcels for the assistant`);
-    return { indexed };
-  }
+    // Whatever is left in the index now belongs to no parcel in this table.
+    const removed = await this.ragService.pruneParcelsExcept(ids);
 
-  /**
-   * Fire-and-forget re-index. This used to POST to `/api/rag/index/parcel`
-   * over HTTP, which only worked because that route was unauthenticated —
-   * guarding it turned the self-call into a 401. Calling `RagService`
-   * directly removes the hole along with a network hop, and the catch keeps a
-   * failing vector store from failing the parcel write.
-   */
-  private async triggerParcelIndex(parcel: Parcel): Promise<void> {
-    try {
-      await this.ragService.indexParcel(this.toIndexDocument(parcel));
-    } catch (error) {
-      const message = error instanceof Error ? error.message : 'Unknown error';
-      this.logger.warn(
-        `RAG indexing failed for ${parcel.trackingId}: ${message}`,
-      );
-    }
+    this.logger.log(
+      `Re-indexed ${indexed} parcels for the assistant, removed ${removed} stale`,
+    );
+    return { indexed, removed };
   }
 
   /** Expects `statusLogs` oldest first — the note indexed is the latest one. */

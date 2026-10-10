@@ -97,6 +97,17 @@ describe('dummy-data seed', () => {
       }
     });
 
+    it('never dates a delivery in the future', () => {
+      const now = Date.now();
+
+      for (const parcel of parcels) {
+        expect(Date.parse(parcel.createdAt)).toBeLessThanOrEqual(now);
+        if (parcel.deliveredAt) {
+          expect(Date.parse(parcel.deliveredAt)).toBeLessThanOrEqual(now);
+        }
+      }
+    });
+
     it('spreads creation dates across the trend window', () => {
       const days = parcels.map((p) =>
         Math.floor((Date.now() - new Date(p.createdAt).getTime()) / 86_400_000),
@@ -131,6 +142,14 @@ describe('dummy-data seed', () => {
       for (const parcel of parcels) {
         const own = logs.filter((l) => l.parcelId === parcel.id);
         expect(own).toHaveLength(expected[parcel.status]);
+      }
+    });
+
+    it('never dates a status change in the future', () => {
+      const now = Date.now();
+
+      for (const log of logs) {
+        expect(Date.parse(log.createdAt)).toBeLessThanOrEqual(now);
       }
     });
 
