@@ -38,7 +38,7 @@ import { PublicParcel } from '../types/parcel.types';
 import { ParcelService } from '../services/parcel.service';
 
 /** Every route below takes the parcel's public `trackingId`, not its uuid. */
-const TRACKING_ID = { name: 'trackingId', example: 'TRK-20260828-A1B2C3' };
+const TRACKING_ID = { name: 'trackingId', example: 'TRK-7K2M9QX4T1VB' };
 
 @ApiTags('Parcels')
 @Controller('parcels')
@@ -69,7 +69,11 @@ export class ParcelController {
   })
   @ApiParam(TRACKING_ID)
   @ApiResponse({ status: 200, type: ParcelResponseDto })
-  @ApiResponse({ status: 400, description: 'Parcel is blocked or cancelled' })
+  @ApiResponse({
+    status: 400,
+    description:
+      'Parcel is blocked, the transition is not allowed, or DELIVERED was requested for a cash-on-delivery parcel whose cash is not recorded',
+  })
   @ApiResponse({
     status: 403,
     description:
@@ -89,10 +93,15 @@ export class ParcelController {
   @ApiBearerAuth(JWT_AUTH)
   @ApiOperation({
     summary: 'Cancel a parcel',
-    description: 'Sender only, and only before the parcel has been dispatched.',
+    description:
+      'Sender only, and only while the parcel is still PENDING. After pickup an admin cancels it through the status route.',
   })
   @ApiParam(TRACKING_ID)
   @ApiResponse({ status: 200, type: ParcelResponseDto })
+  @ApiResponse({
+    status: 400,
+    description: 'Parcel is blocked or has already been picked up',
+  })
   @UseGuards(JwtAuthGuard, RolesGuard)
   @Roles(Role.SENDER)
   @Patch(':trackingId/cancel')
@@ -106,12 +115,17 @@ export class ParcelController {
   @ApiBearerAuth(JWT_AUTH)
   @ApiOperation({
     summary: 'Confirm delivery',
-    description: 'Receiver only.',
+    description:
+      'Any signed-in account, for a parcel addressed to it. A cash-on-delivery parcel is refused until the courier has recorded the cash through delivery proof.',
   })
   @ApiParam(TRACKING_ID)
   @ApiResponse({ status: 200, type: ParcelResponseDto })
-  @UseGuards(JwtAuthGuard, RolesGuard)
-  @Roles(Role.RECEIVER)
+  @ApiResponse({
+    status: 400,
+    description: 'Parcel is blocked, or cash on delivery is not collected yet',
+  })
+  @ApiResponse({ status: 403, description: 'Parcel is not addressed to you' })
+  @UseGuards(JwtAuthGuard)
   @Patch(':trackingId/confirm')
   confirmParcel(
     @Param('trackingId') trackingId: string,
@@ -135,6 +149,24 @@ export class ParcelController {
   }
 
   @ApiBearerAuth(JWT_AUTH)
+  @ApiOperation({
+    summary: 'Release a blocked parcel',
+    description: 'Admin only. The parcel resumes from the status it was in.',
+  })
+  @ApiParam(TRACKING_ID)
+  @ApiResponse({ status: 200, type: ParcelResponseDto })
+  @ApiResponse({ status: 400, description: 'Parcel is not blocked' })
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(Role.ADMIN)
+  @Patch(':trackingId/unblock')
+  unblockParcel(
+    @Param('trackingId') trackingId: string,
+    @CurrentUser() user: User,
+  ): Promise<Parcel> {
+    return this.parcelService.unblockParcel(trackingId, user);
+  }
+
+  @ApiBearerAuth(JWT_AUTH)
   @ApiOperation({ summary: 'Parcels you sent', description: 'Sender only.' })
   @ApiResponse({ status: 200, type: PaginatedParcelsDto })
   @UseGuards(JwtAuthGuard, RolesGuard)
@@ -150,11 +182,11 @@ export class ParcelController {
   @ApiBearerAuth(JWT_AUTH)
   @ApiOperation({
     summary: 'Parcels on their way to you',
-    description: 'Receiver only.',
+    description:
+      'Any signed-in account. A parcel can be addressed to a sender or courier account too, so this is scoped by who the receiver is, not by role.',
   })
   @ApiResponse({ status: 200, type: PaginatedParcelsDto })
-  @UseGuards(JwtAuthGuard, RolesGuard)
-  @Roles(Role.RECEIVER)
+  @UseGuards(JwtAuthGuard)
   @Get('incoming-parcels')
   getIncomingParcels(
     @CurrentUser() user: User,
@@ -166,11 +198,10 @@ export class ParcelController {
   @ApiBearerAuth(JWT_AUTH)
   @ApiOperation({
     summary: 'Parcels already delivered to you',
-    description: 'Receiver only.',
+    description: 'Any signed-in account, scoped to parcels addressed to it.',
   })
   @ApiResponse({ status: 200, type: PaginatedParcelsDto })
-  @UseGuards(JwtAuthGuard, RolesGuard)
-  @Roles(Role.RECEIVER)
+  @UseGuards(JwtAuthGuard)
   @Get('delivery-history')
   getDeliveryHistory(
     @CurrentUser() user: User,

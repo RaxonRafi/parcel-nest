@@ -189,7 +189,6 @@ export function buildParcels(
   return statuses.map((status, i) => {
     const sender = pick(senders);
     const receiver = pick(receivers);
-    const isClosed = status === 'DELIVERED' || status === 'CANCELLED';
     const needsCourier = status !== 'PENDING' && status !== 'CANCELLED';
     const courier = needsCourier ? pick(couriers) : null;
 

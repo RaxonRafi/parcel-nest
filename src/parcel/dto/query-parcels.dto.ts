@@ -1,5 +1,5 @@
 import { ApiPropertyOptional } from '@nestjs/swagger';
-import { Transform, Type } from 'class-transformer';
+import { Transform } from 'class-transformer';
 import {
   IsBoolean,
   IsDateString,
@@ -10,6 +10,7 @@ import {
 } from 'class-validator';
 import { PaginationQueryDto } from '../../common/dto/pagination-query.dto';
 import { ParcelStatus } from '../types/parcel.types';
+import { trimString } from '../../common/utils/trim.transform';
 
 export class QueryParcelsDto extends PaginationQueryDto {
   @ApiPropertyOptional({ enum: ParcelStatus })
@@ -25,7 +26,7 @@ export class QueryParcelsDto extends PaginationQueryDto {
   @IsOptional()
   @IsString()
   @MaxLength(120)
-  @Transform(({ value }) => (typeof value === 'string' ? value.trim() : value))
+  @Transform(trimString)
   search?: string;
 
   @ApiPropertyOptional({ description: 'Created on or after this date.' })

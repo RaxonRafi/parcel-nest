@@ -4,13 +4,13 @@ import { AccessControlModule } from '../common/access-control.module';
 import { MulterModule } from '@nestjs/platform-express';
 import { RagController } from './controllers/rag.controller';
 import { RagService } from './services/rag.service';
+import { UPLOAD_DIR } from './rag.constants';
 
 @Module({
   imports: [
     ConfigModule,
     AccessControlModule,
-    // /tmp is the only writable path on Vercel's serverless filesystem.
-    MulterModule.register({ dest: '/tmp/uploads' }),
+    MulterModule.register({ dest: UPLOAD_DIR }),
   ],
   controllers: [RagController],
   providers: [RagService],

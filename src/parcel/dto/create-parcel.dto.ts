@@ -14,6 +14,7 @@ import {
   ValidateIf,
 } from 'class-validator';
 import { PHONE_REGEX } from '../../common/constants/validation.constants';
+import { trimString } from '../../common/utils/trim.transform';
 
 /** One of `receiverId` / `receiverEmail` must be present. */
 export class CreateParcelDto {
@@ -30,7 +31,7 @@ export class CreateParcelDto {
   @IsString()
   @IsNotEmpty({ message: 'Receiver name is required' })
   @MaxLength(120)
-  @Transform(({ value }) => (typeof value === 'string' ? value.trim() : value))
+  @Transform(trimString)
   receiverName!: string;
 
   @ApiPropertyOptional({ example: '+8801700000000' })
@@ -51,7 +52,7 @@ export class CreateParcelDto {
     {},
     { message: 'Either receiverId or a valid receiverEmail is required' },
   )
-  @Transform(({ value }) => (typeof value === 'string' ? value.trim() : value))
+  @Transform(trimString)
   receiverEmail?: string;
 
   @ApiProperty({ example: '12 Gulshan Ave, Dhaka' })

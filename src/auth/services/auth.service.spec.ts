@@ -1,6 +1,5 @@
 import { Test, TestingModule } from '@nestjs/testing';
 import { BadRequestException, UnauthorizedException } from '@nestjs/common';
-import { ConfigService } from '@nestjs/config';
 import { User } from '../../user/entities/user.entity';
 import { UserService } from '../../user/services/user.service';
 import { TokenService } from '../../token/services/token.service';
@@ -42,6 +41,7 @@ describe('AuthService', () => {
       createUserTokens: jest.fn().mockReturnValue(pair),
       verifyRefreshToken: jest.fn().mockReturnValue({ email: user.email }),
       signAccessToken: jest.fn().mockReturnValue('access'),
+      refreshTokenExpiresAt: jest.fn().mockReturnValue(new Date()),
     };
     sessionService = {
       record: jest.fn(),
@@ -68,10 +68,6 @@ describe('AuthService', () => {
         {
           provide: EmailVerificationService,
           useValue: emailVerificationService,
-        },
-        {
-          provide: ConfigService,
-          useValue: { getOrThrow: jest.fn().mockReturnValue('7d') },
         },
       ],
     }).compile();
@@ -110,12 +106,12 @@ describe('AuthService', () => {
       ).rejects.toThrow('Invalid email or password');
     });
 
-    it('refuses a blocked account', async () => {
+    it('refuses a blocked account with the same 401 the guard gives', async () => {
       userService.getSignInBlockReason.mockReturnValue('User is BLOCKED');
 
       await expect(
         service.login({ email: user.email, password: 'pw' }),
-      ).rejects.toBeInstanceOf(BadRequestException);
+      ).rejects.toBeInstanceOf(UnauthorizedException);
     });
 
     it('strips the password from the returned user', async () => {
@@ -139,6 +135,16 @@ describe('AuthService', () => {
       expect(result).toEqual(pair);
     });
 
+    it('refuses the loser when one token is exchanged twice at once', async () => {
+      // Both requests pass `assertActive`; only one wins the revoke.
+      sessionService.revoke.mockResolvedValue(false);
+
+      await expect(
+        service.refreshAccessToken('old-refresh'),
+      ).rejects.toBeInstanceOf(UnauthorizedException);
+      expect(sessionService.record).not.toHaveBeenCalled();
+    });
+
     it('refuses a token whose session has ended', async () => {
       sessionService.assertActive.mockRejectedValue(
         new UnauthorizedException('Session has ended'),
@@ -154,7 +160,8 @@ describe('AuthService', () => {
     it('ends one session when given a token', async () => {
       const result = await service.logout(user, 'refresh');
 
-      expect(sessionService.revoke).toHaveBeenCalledWith('refresh');
+      // Scoped to the caller, so one user cannot end another's session.
+      expect(sessionService.revoke).toHaveBeenCalledWith('refresh', user.id);
       expect(sessionService.revokeAllForUser).not.toHaveBeenCalled();
       expect(result.message).toBe('Logged out successfully');
     });
@@ -202,6 +209,12 @@ describe('AuthService', () => {
       );
       expect(sessionService.revokeAllForUser).toHaveBeenCalledWith(user.id);
     });
+
+    it('marks the address verified — the link proved it', async () => {
+      await service.resetPassword('a'.repeat(64), 'NewPassw0rd!');
+
+      expect(userService.markVerified).toHaveBeenCalledWith(user.id);
+    });
   });
 
   describe('changePassword', () => {
@@ -228,10 +241,13 @@ describe('AuthService', () => {
 
     it('refuses an account with no password set', async () => {
       await expect(
-        service.changePassword({ ...user, password: '' } as User, {
-          currentPassword: 'pw',
-          newPassword: 'NewPassw0rd!',
-        }),
+        service.changePassword(
+          { ...user, password: '' },
+          {
+            currentPassword: 'pw',
+            newPassword: 'NewPassw0rd!',
+          },
+        ),
       ).rejects.toBeInstanceOf(BadRequestException);
     });
   });
@@ -257,7 +273,7 @@ describe('AuthService', () => {
       userService.findByEmail.mockResolvedValue({
         ...user,
         isVerified: true,
-      } as User);
+      });
 
       await service.resendVerification(user.email);
 

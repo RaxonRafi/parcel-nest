@@ -1,12 +1,24 @@
-import { INestApplication, ValidationPipe } from '@nestjs/common';
+import { INestApplication, Logger } from '@nestjs/common';
 import { NestFactory } from '@nestjs/core';
+import { NestExpressApplication } from '@nestjs/platform-express';
 import { IoAdapter } from '@nestjs/platform-socket.io';
+import type { Request, RequestHandler, Response } from 'express';
 import { ServerOptions } from 'socket.io';
 import { AppModule } from './app.module';
+import { configureApp } from './config/app.config';
 import { setupSwagger } from './config/swagger.config';
 import { UserService } from './user/services/user.service';
 
-let app: INestApplication | undefined;
+const logger = new Logger('Bootstrap');
+
+const DEFAULT_ORIGINS = [
+  'http://localhost:3001',
+  'http://127.0.0.1:3001',
+  'https://percel-client-next.vercel.app',
+];
+
+/** Memoised so concurrent cold-start requests share one boot. */
+let appPromise: Promise<INestApplication> | undefined;
 
 /** Applies the HTTP CORS allow-list to the Socket.IO handshake as well. */
 class CorsIoAdapter extends IoAdapter {
@@ -25,33 +37,44 @@ class CorsIoAdapter extends IoAdapter {
   }
 }
 
-async function bootstrap(): Promise<INestApplication> {
-  if (app) return app;
+/** `a.com, b.com` is how people write lists; an origin with a space matches nothing. */
+function corsOrigins(): string[] {
+  const configured = (process.env.CORS_ORIGIN ?? '')
+    .split(',')
+    .map((origin) => origin.trim())
+    .filter(Boolean);
 
-  app = await NestFactory.create(AppModule);
+  return configured.length ? configured : DEFAULT_ORIGINS;
+}
+
+/**
+ * How many proxies sit in front of the app. Without it `req.ip` is the
+ * proxy's address, so every client shares one rate-limit bucket. Left unset
+ * off Vercel, because trusting `X-Forwarded-For` with no proxy in front lets
+ * a client pick its own address.
+ */
+function trustedProxyHops(): number | undefined {
+  const configured = process.env.TRUST_PROXY ?? (process.env.VERCEL ? '1' : '');
+  const hops = Number(configured);
+
+  return configured !== '' && Number.isInteger(hops) && hops > 0
+    ? hops
+    : undefined;
+}
+
+async function createApp(): Promise<INestApplication> {
+  const app = await NestFactory.create<NestExpressApplication>(AppModule);
+
+  const hops = trustedProxyHops();
+  if (hops) {
+    app.set('trust proxy', hops);
+  }
 
   const userService = app.get(UserService);
   await userService.seedSuperAdmin();
 
-  app.setGlobalPrefix('api');
-  app.useGlobalPipes(
-    new ValidationPipe({
-      // Drop unknown keys instead of letting them reach a service, and reject
-      // the request outright when the caller sends one — silently ignoring a
-      // misspelled field is how bugs stay hidden.
-      whitelist: true,
-      forbidNonWhitelisted: true,
-      // Bodies arrive as JSON, so payloads need converting to DTO instances
-      // before class-validator's type checks mean anything.
-      transform: true,
-      transformOptions: { enableImplicitConversion: false },
-    }),
-  );
-  const origins = process.env.CORS_ORIGIN?.split(',') ?? [
-    'http://localhost:3001',
-    'http://127.0.0.1:3001',
-    'https://percel-client-next.vercel.app',
-  ];
+  configureApp(app);
+  const origins = corsOrigins();
   app.enableCors({ origin: origins, credentials: true });
   app.useWebSocketAdapter(new CorsIoAdapter(app, origins));
   setupSwagger(app);
@@ -60,10 +83,10 @@ async function bootstrap(): Promise<INestApplication> {
   // a Vercel function cannot hold a connection open.
   if (!process.env.VERCEL) {
     await app.listen(process.env.PORT ?? 3000);
-    console.log(
+    logger.log(
       `🚀 Server running on http://localhost:${process.env.PORT ?? 3000}/api`,
     );
-    console.log(
+    logger.log(
       `📖 Swagger UI on http://localhost:${process.env.PORT ?? 3000}/api/docs`,
     );
   } else {
@@ -73,11 +96,33 @@ async function bootstrap(): Promise<INestApplication> {
   return app;
 }
 
-bootstrap();
+function bootstrap(): Promise<INestApplication> {
+  appPromise ??= createApp().catch((error: unknown) => {
+    // Forget the failed attempt so the next serverless invocation retries
+    // instead of replaying the same rejection forever.
+    appPromise = undefined;
+    throw error;
+  });
+
+  return appPromise;
+}
+
+bootstrap().catch((error: unknown) => {
+  logger.error(
+    'Application failed to start',
+    error instanceof Error ? error.stack : String(error),
+  );
+
+  // A long-running host should exit so its supervisor restarts it. On Vercel
+  // the handler below retries the boot on the next request.
+  if (!process.env.VERCEL) {
+    process.exit(1);
+  }
+});
 
 // ✅ Vercel serverless export
-export default async (req: any, res: any) => {
+export default async (req: Request, res: Response): Promise<void> => {
   const server = await bootstrap();
-  const httpAdapter = server.getHttpAdapter().getInstance();
-  httpAdapter(req, res);
+  const handler = server.getHttpAdapter().getInstance() as RequestHandler;
+  void handler(req, res, () => undefined);
 };

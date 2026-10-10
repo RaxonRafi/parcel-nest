@@ -1,6 +1,6 @@
 import { INestApplication } from '@nestjs/common';
 import request from 'supertest';
-import { createTestApp } from './helpers/test-app';
+import { createTestApp, httpServer } from './helpers/test-app';
 
 describe('App (e2e)', () => {
   let app: INestApplication;
@@ -16,7 +16,7 @@ describe('App (e2e)', () => {
   });
 
   it('GET /api returns hello', async () => {
-    await request(app.getHttpServer())
+    await request(httpServer(app))
       .get('/api')
       .expect(200)
       .expect('Hello World!');

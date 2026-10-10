@@ -7,6 +7,7 @@ import {
 import { Server, Socket } from 'socket.io';
 import { TokenService } from '../token/services/token.service';
 import { UserService } from '../user/services/user.service';
+import { UserEventsService } from '../user/services/user-events.service';
 import { roleRoom, userRoom } from './realtime.types';
 
 /**
@@ -26,6 +27,7 @@ export class RealtimeGateway implements OnGatewayInit {
   constructor(
     private readonly tokenService: TokenService,
     private readonly userService: UserService,
+    private readonly userEvents: UserEventsService,
   ) {}
 
   afterInit(server: Server): void {
@@ -36,6 +38,12 @@ export class RealtimeGateway implements OnGatewayInit {
         .then(() => next())
         .catch(() => next(new Error('unauthorized')));
     });
+    // The handshake is the only time a socket is checked, so an account
+    // blocked afterwards has to be disconnected explicitly.
+    this.userEvents.accessRevoked$.subscribe((userId) => {
+      server.in(userRoom(userId)).disconnectSockets(true);
+    });
+
     this.logger.log('Realtime gateway ready');
   }
 

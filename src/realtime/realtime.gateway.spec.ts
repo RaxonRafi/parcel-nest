@@ -4,6 +4,7 @@ import { AddressInfo } from 'net';
 import { io, Socket } from 'socket.io-client';
 import { ParcelStatus } from '../parcel/types/parcel.types';
 import { TokenService } from '../token/services/token.service';
+import { UserEventsService } from '../user/services/user-events.service';
 import { UserService } from '../user/services/user.service';
 import { Role } from '../user/types/user.types';
 import { RealtimeGateway } from './realtime.gateway';
@@ -19,6 +20,7 @@ const USERS: Record<string, { id: string; role: Role; blocked?: boolean }> = {
 describe('RealtimeGateway', () => {
   let app: INestApplication;
   let realtime: RealtimeService;
+  let userEvents: UserEventsService;
   let url: string;
   const sockets: Socket[] = [];
 
@@ -27,6 +29,7 @@ describe('RealtimeGateway', () => {
       providers: [
         RealtimeGateway,
         RealtimeService,
+        UserEventsService,
         {
           provide: TokenService,
           useValue: {
@@ -50,6 +53,7 @@ describe('RealtimeGateway', () => {
     app = moduleRef.createNestApplication();
     await app.listen(0);
     realtime = app.get(RealtimeService);
+    userEvents = app.get(UserEventsService);
     const server = app.getHttpServer() as { address(): AddressInfo };
     const { port } = server.address();
     url = `http://127.0.0.1:${port}`;
@@ -117,5 +121,18 @@ describe('RealtimeGateway', () => {
     const received = await forAdmin;
     expect(received.id).toEqual(expect.any(String));
     expect(Number.isNaN(Date.parse(received.createdAt))).toBe(false);
+  });
+
+  it('drops the sockets of a user who is blocked while connected', async () => {
+    const sender = await connect('sender-token');
+    const admin = await connect('admin-token');
+    const dropped = new Promise<string>((resolve) =>
+      sender.once('disconnect', resolve),
+    );
+
+    userEvents.announceAccessRevoked('sender-1');
+
+    await expect(dropped).resolves.toBe('io server disconnect');
+    expect(admin.connected).toBe(true);
   });
 });

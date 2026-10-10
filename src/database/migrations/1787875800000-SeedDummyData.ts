@@ -26,9 +26,9 @@ export class SeedDummyData1787875800000 implements MigrationInterface {
       return;
     }
 
-    const existing = await queryRunner.query(
+    const existing = (await queryRunner.query(
       `SELECT COUNT(*)::int AS n FROM users WHERE email LIKE '%@seed.local'`,
-    );
+    )) as { n: number }[];
     if (existing[0].n > 0) {
       console.log('[seed] skipped — seed data is already present');
       return;

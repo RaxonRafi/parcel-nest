@@ -3,6 +3,7 @@ import { Transform } from 'class-transformer';
 import { IsEnum, IsOptional, IsString, MaxLength } from 'class-validator';
 import { PaginationQueryDto } from '../../common/dto/pagination-query.dto';
 import { IsActive, Role } from '../types/user.types';
+import { trimString } from '../../common/utils/trim.transform';
 
 export class QueryUsersDto extends PaginationQueryDto {
   @ApiPropertyOptional({ enum: Role })
@@ -22,6 +23,6 @@ export class QueryUsersDto extends PaginationQueryDto {
   @IsOptional()
   @IsString()
   @MaxLength(120)
-  @Transform(({ value }) => (typeof value === 'string' ? value.trim() : value))
+  @Transform(trimString)
   search?: string;
 }

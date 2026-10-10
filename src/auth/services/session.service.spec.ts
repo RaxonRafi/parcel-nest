@@ -103,11 +103,33 @@ describe('SessionService', () => {
 
   describe('revoke', () => {
     it('stamps revokedAt and reports success', async () => {
-      const row = storedRow();
-      repo.find.mockResolvedValue([row]);
+      repo.find.mockResolvedValue([storedRow()]);
+      repo.update.mockResolvedValue({ affected: 1 });
 
       await expect(service.revoke(TOKEN)).resolves.toBe(true);
-      expect(row.revokedAt).toBeInstanceOf(Date);
+      expect(repo.update).toHaveBeenCalledWith(
+        expect.objectContaining({ id: 'row-1' }),
+        { revokedAt: expect.any(Date) },
+      );
+    });
+
+    it('reports false when another request revoked it first', async () => {
+      repo.find.mockResolvedValue([storedRow()]);
+      repo.update.mockResolvedValue({ affected: 0 });
+
+      await expect(service.revoke(TOKEN)).resolves.toBe(false);
+    });
+
+    it('only touches the given user when one is named', async () => {
+      repo.find.mockResolvedValue([storedRow()]);
+      repo.update.mockResolvedValue({ affected: 0 });
+
+      await service.revoke(TOKEN, 'user-2');
+
+      expect(repo.update).toHaveBeenCalledWith(
+        expect.objectContaining({ user: { id: 'user-2' } }),
+        expect.anything(),
+      );
     });
 
     it('reports false when there was nothing to revoke', async () => {

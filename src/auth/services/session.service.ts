@@ -60,16 +60,32 @@ export class SessionService {
     return null;
   }
 
-  async revoke(token: string): Promise<boolean> {
+  /**
+   * Ends one session. Pass `userId` to refuse a token that belongs to someone
+   * else: logout takes the token from the request body, so it has to be
+   * checked against the caller.
+   *
+   * The write is conditional on the row still being live, so of two concurrent
+   * calls with the same token exactly one reports success. Rotation relies on
+   * that to stop a refresh token being exchanged twice.
+   */
+  async revoke(token: string, userId?: string): Promise<boolean> {
     const stored = await this.findActive(token);
 
     if (!stored) {
       return false;
     }
 
-    stored.revokedAt = new Date();
-    await this.refreshTokenRepository.save(stored);
-    return true;
+    const result = await this.refreshTokenRepository.update(
+      {
+        id: stored.id,
+        revokedAt: IsNull(),
+        ...(userId ? { user: { id: userId } } : {}),
+      },
+      { revokedAt: new Date() },
+    );
+
+    return (result.affected ?? 0) > 0;
   }
 
   /** Ends every session for a user — logout-everywhere, and after a reset. */

@@ -1,7 +1,12 @@
-import { Injectable, OnModuleInit, Logger } from '@nestjs/common';
+import {
+  Injectable,
+  Logger,
+  OnModuleInit,
+  ServiceUnavailableException,
+} from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { PineconeStore } from '@langchain/pinecone';
-import { Pinecone } from '@pinecone-database/pinecone';
+import { Index, Pinecone } from '@pinecone-database/pinecone';
 import { Document } from '@langchain/core/documents';
 import { ChatPromptTemplate } from '@langchain/core/prompts';
 import { StringOutputParser } from '@langchain/core/output_parsers';
@@ -13,7 +18,7 @@ import { ChatGroq } from '@langchain/groq';
 import { HuggingFaceInferenceEmbeddings } from '@langchain/community/embeddings/hf';
 import { PDFLoader } from '@langchain/community/document_loaders/fs/pdf';
 import { RecursiveCharacterTextSplitter } from '@langchain/textsplitters';
-import * as fs from 'fs';
+import { Role } from '../../user/types/user.types';
 import {
   ParcelDocument,
   PdfIngestResult,
@@ -22,6 +27,7 @@ import {
   RagFilter,
   RagSource,
   RagStreamChunk,
+  RagViewer,
 } from '../types/rag.types';
 
 /**
@@ -39,21 +45,87 @@ export function isSmallTalk(message: string): boolean {
 /** Overridable with the GROQ_MODEL env var. */
 const DEFAULT_GROQ_MODEL = 'openai/gpt-oss-20b';
 
+const REQUIRED_KEYS = [
+  'PINECONE_API_KEY',
+  'PINECONE_INDEX',
+  'HUGGINGFACE_API_KEY',
+  'GROQ_API_KEY',
+] as const;
+
+/** Every chunk of one PDF shares this id prefix. */
+const pdfChunkPrefix = (source: string): string => `pdf-${source}-chunk-`;
+
+type MetadataFilter = Record<string, unknown>;
+
+/**
+ * What a question may be answered from.
+ *
+ * Policy PDFs are for everyone. Parcels are not: an admin sees all of them,
+ * anyone else only the ones they sent, are receiving, or are carrying. The
+ * restriction is applied in the vector query itself, so a parcel the viewer
+ * has no part in is never retrieved and cannot leak into an answer.
+ */
+export function buildRetrievalFilter(
+  filter: RagFilter,
+  viewer: RagViewer,
+): MetadataFilter | undefined {
+  const pdfs: MetadataFilter = { type: { $eq: 'pdf' } };
+  const parcels: MetadataFilter = { type: { $eq: 'parcel' } };
+
+  if (viewer.role === Role.ADMIN) {
+    if (filter === 'pdf') return pdfs;
+    if (filter === 'parcel') return parcels;
+    return undefined;
+  }
+
+  const ownParcels: MetadataFilter = {
+    $and: [
+      parcels,
+      {
+        $or: [
+          { sender_id: { $eq: viewer.id } },
+          { receiver_id: { $eq: viewer.id } },
+          { courier_id: { $eq: viewer.id } },
+        ],
+      },
+    ],
+  };
+
+  if (filter === 'pdf') return pdfs;
+  if (filter === 'parcel') return ownParcels;
+  return { $or: [pdfs, ownParcels] };
+}
+
 @Injectable()
 export class RagService implements OnModuleInit {
   private readonly logger = new Logger(RagService.name);
-  private vectorStore!: PineconeStore;
+  private pineconeIndex: Index | null = null;
+  private vectorStore: PineconeStore | null = null;
   private embeddings!: HuggingFaceInferenceEmbeddings;
   private llm!: ChatGroq;
 
   constructor(private config: ConfigService) {}
 
+  /**
+   * Optional on purpose, like mail: without provider keys the assistant is
+   * switched off and the rest of the API still boots. Parcel indexing becomes
+   * a no-op and the ask routes answer 503.
+   */
   async onModuleInit() {
+    const missing = REQUIRED_KEYS.filter((key) => !this.config.get(key));
+
+    if (missing.length) {
+      this.logger.warn(
+        `RAG is disabled — missing ${missing.join(', ')}. The assistant routes will answer 503.`,
+      );
+      return;
+    }
+
     const pinecone = new Pinecone({
       apiKey: this.config.getOrThrow<string>('PINECONE_API_KEY'),
     });
 
-    const pineconeIndex = pinecone.Index(
+    this.pineconeIndex = pinecone.Index(
       this.config.getOrThrow<string>('PINECONE_INDEX'),
     );
 
@@ -74,19 +146,39 @@ export class RagService implements OnModuleInit {
     });
 
     this.vectorStore = await PineconeStore.fromExistingIndex(this.embeddings, {
-      pineconeIndex,
+      pineconeIndex: this.pineconeIndex,
       textKey: 'text',
     });
 
     this.logger.log('✅ RAG initialized (Groq + HuggingFace + Pinecone)');
   }
 
+  get isEnabled(): boolean {
+    return this.vectorStore !== null;
+  }
+
+  /** Call before a response starts streaming, while a 503 can still be sent. */
+  assertAvailable(): void {
+    this.store();
+  }
+
+  private store(): PineconeStore {
+    if (!this.vectorStore) {
+      throw new ServiceUnavailableException(
+        'The assistant is not configured on this server',
+      );
+    }
+    return this.vectorStore;
+  }
+
   // ─── PDF Ingestion ────────────────────────────────────────────────────────
 
+  /** The caller owns the temp file and removes it; this only reads it. */
   async ingestPDF(
     filePath: string,
     metadata: PdfMetadata,
   ): Promise<PdfIngestResult> {
+    const store = this.store();
     const loader = new PDFLoader(filePath);
     const rawDocs = await loader.load();
 
@@ -107,10 +199,12 @@ export class RagService implements OnModuleInit {
       },
     }));
 
-    const ids = chunks.map((_, i) => `pdf-${metadata.source}-chunk-${i}`);
-    await this.vectorStore.addDocuments(taggedChunks, { ids });
+    // Chunk ids are positional, so a shorter re-upload would overwrite the
+    // first N and leave the old tail answering questions. Clear it first.
+    await this.deletePDF(metadata.source);
 
-    fs.unlinkSync(filePath);
+    const ids = chunks.map((_, i) => `${pdfChunkPrefix(metadata.source)}${i}`);
+    await store.addDocuments(taggedChunks, { ids });
 
     this.logger.log(
       `📄 Ingested "${metadata.source}" → ${chunks.length} chunks`,
@@ -120,16 +214,58 @@ export class RagService implements OnModuleInit {
 
   // ─── Delete PDF ───────────────────────────────────────────────────────────
 
+  /**
+   * Removes every chunk of one PDF.
+   *
+   * Serverless Pinecone indexes cannot delete by metadata filter but can list
+   * ids by prefix; pod-based indexes are the other way round. Try the prefix
+   * listing first and fall back to the filter.
+   */
   async deletePDF(source: string): Promise<void> {
-    await this.vectorStore.delete({
-      filter: { source: { $eq: source }, type: { $eq: 'pdf' } },
-    });
-    this.logger.log(`🗑️ Deleted PDF "${source}" from Pinecone`);
+    const store = this.store();
+    const index = this.pineconeIndex;
+
+    try {
+      if (!index) throw new Error('no index handle');
+
+      let removed = 0;
+      let paginationToken: string | undefined;
+      do {
+        const page = await index.listPaginated({
+          prefix: pdfChunkPrefix(source),
+          paginationToken,
+        });
+        const ids = (page.vectors ?? [])
+          .map((vector) => vector.id)
+          .filter((id): id is string => !!id);
+
+        if (ids.length) {
+          await index.deleteMany(ids);
+          removed += ids.length;
+        }
+        paginationToken = page.pagination?.next;
+      } while (paginationToken);
+
+      this.logger.log(`🗑️ Deleted ${removed} chunks of "${source}"`);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Unknown error';
+      this.logger.debug(
+        `Prefix delete unavailable (${message}) — deleting "${source}" by filter`,
+      );
+      await store.delete({
+        filter: { source: { $eq: source }, type: { $eq: 'pdf' } },
+      });
+      this.logger.log(`🗑️ Deleted PDF "${source}" from Pinecone`);
+    }
   }
 
   // ─── Parcel Indexing ──────────────────────────────────────────────────────
 
   async indexParcel(parcel: ParcelDocument): Promise<void> {
+    // Parcel writes call this on every change; with the assistant switched
+    // off there is simply nothing to keep in sync.
+    if (!this.vectorStore) return;
+
     const doc = new Document({
       pageContent: `
         Tracking Code: ${parcel.trackingCode}
@@ -144,6 +280,11 @@ export class RagService implements OnModuleInit {
         tracking_code: parcel.trackingCode,
         status: parcel.status,
         type: 'parcel',
+        // Who may be shown this parcel — see `buildRetrievalFilter`. Pinecone
+        // rejects null metadata values, so an absent party is left out.
+        ...(parcel.senderId ? { sender_id: parcel.senderId } : {}),
+        ...(parcel.receiverId ? { receiver_id: parcel.receiverId } : {}),
+        ...(parcel.courierId ? { courier_id: parcel.courierId } : {}),
       },
     });
 
@@ -159,7 +300,7 @@ export class RagService implements OnModuleInit {
   }
 
   async deleteParcel(parcelId: string): Promise<void> {
-    await this.vectorStore.delete({ ids: [`parcel-${parcelId}`] });
+    await this.store().delete({ ids: [`parcel-${parcelId}`] });
   }
 
   // ─── Ask ──────────────────────────────────────────────────────────────────
@@ -173,9 +314,10 @@ export class RagService implements OnModuleInit {
    */
   async *askStream(
     question: string,
-    filter?: RagFilter,
+    viewer: RagViewer,
+    filter: RagFilter = 'all',
   ): AsyncGenerator<RagStreamChunk> {
-    const sourceDocs = await this.retrieve(question, filter);
+    const sourceDocs = await this.retrieve(question, viewer, filter);
 
     yield {
       type: 'sources',
@@ -209,9 +351,13 @@ export class RagService implements OnModuleInit {
     }
   }
 
-  async ask(question: string, filter?: RagFilter): Promise<RagAnswer> {
+  async ask(
+    question: string,
+    viewer: RagViewer,
+    filter: RagFilter = 'all',
+  ): Promise<RagAnswer> {
     // Retrieved once and shared with the chain, as in `askStream`.
-    const sourceDocs = await this.retrieve(question, filter);
+    const sourceDocs = await this.retrieve(question, viewer, filter);
 
     const chain = RunnableSequence.from([
       {
@@ -231,20 +377,19 @@ export class RagService implements OnModuleInit {
   /** Nothing is looked up for small talk, so it cites nothing either. */
   private async retrieve(
     question: string,
-    filter?: RagFilter,
+    viewer: RagViewer,
+    filter: RagFilter,
   ): Promise<Document[]> {
+    const store = this.store();
     if (isSmallTalk(question)) return [];
-    return this.buildRetriever(filter).invoke(question);
-  }
 
-  /** Shared by `ask` and `askStream` so the two cannot retrieve differently. */
-  private buildRetriever(filter?: RagFilter) {
-    return filter && filter !== 'all'
-      ? this.vectorStore.asRetriever({
-          k: 5,
-          filter: { type: { $eq: filter } },
-        })
-      : this.vectorStore.asRetriever({ k: 5 });
+    // Shared by `ask` and `askStream` so the two cannot retrieve differently.
+    const scope = buildRetrievalFilter(filter, viewer);
+    const retriever = scope
+      ? store.asRetriever({ k: 5, filter: scope })
+      : store.asRetriever({ k: 5 });
+
+    return retriever.invoke(question);
   }
 
   private answerPrompt(): ChatPromptTemplate {
@@ -266,10 +411,17 @@ export class RagService implements OnModuleInit {
   }
 
   private toSource(doc: Document): RagSource {
+    const metadata = doc.metadata as {
+      type: string;
+      source?: string;
+      tracking_code?: string;
+      loc?: { pageNumber?: number };
+    };
+
     return {
-      type: doc.metadata.type,
-      source: doc.metadata.source ?? doc.metadata.tracking_code,
-      page: doc.metadata.loc?.pageNumber ?? null,
+      type: metadata.type,
+      source: metadata.source ?? metadata.tracking_code ?? '',
+      page: metadata.loc?.pageNumber ?? null,
     };
   }
 }

@@ -77,8 +77,18 @@ export class EmailVerificationService {
       );
     }
 
-    grant.usedAt = new Date();
-    await this.repository.save(grant);
+    // Conditional on still being unused, so a link opened twice at once is
+    // spent exactly once.
+    const claimed = await this.repository.update(
+      { id: grant.id, usedAt: IsNull() },
+      { usedAt: new Date() },
+    );
+
+    if (!claimed.affected) {
+      throw new BadRequestException(
+        'This confirmation link is invalid or has expired — request a new one',
+      );
+    }
 
     return grant.user;
   }

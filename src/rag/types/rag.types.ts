@@ -1,4 +1,12 @@
+import { Role } from '../../user/types/user.types';
+
 export type RagFilter = 'pdf' | 'parcel' | 'all';
+
+/** Who is asking — decides which parcels retrieval is allowed to return. */
+export interface RagViewer {
+  id: string;
+  role: Role;
+}
 
 /** Flattened parcel record as it is stored in the vector index. */
 export interface ParcelDocument {
@@ -10,6 +18,10 @@ export interface ParcelDocument {
   recipientName: string;
   updatedAt: string;
   notes?: string;
+  /** Stored as metadata so retrieval can be limited to the parcel's parties. */
+  senderId?: string;
+  receiverId?: string;
+  courierId?: string;
 }
 
 export interface RagSource {

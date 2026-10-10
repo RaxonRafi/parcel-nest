@@ -6,11 +6,18 @@ import { IsNull, LessThan, Repository } from 'typeorm';
 import { MailService } from '../../mail/services/mail.service';
 import { claimAccountTemplate } from '../../mail/templates/account.template';
 import { passwordResetEmail } from '../../mail/templates/password-reset.template';
+import { webBaseUrl } from '../../common/utils/web-url.util';
 import { User } from '../../user/entities/user.entity';
 import { PasswordReset } from '../entities/password-reset.entity';
 import { hashToken } from './session.service';
 
 const EXPIRY_MINUTES = 30;
+
+/**
+ * A claim link is not something the receiver asked for, so it cannot assume
+ * they are at their inbox: it has to survive until they next read their mail.
+ */
+const CLAIM_EXPIRY_DAYS = 7;
 
 /** Sole owner of the `password_resets` table. */
 @Injectable()
@@ -29,8 +36,8 @@ export class PasswordResetService {
    * is spent first, so requesting a second link invalidates the first.
    */
   async issue(user: User): Promise<void> {
-    const token = await this.createGrant(user);
-    const url = `${this.webBaseUrl()}/reset-password?token=${token}`;
+    const token = await this.createGrant(user, EXPIRY_MINUTES);
+    const url = `${webBaseUrl(this.config)}/reset-password?token=${token}`;
     const { html, text } = passwordResetEmail(user.name, url, EXPIRY_MINUTES);
 
     try {
@@ -62,14 +69,14 @@ export class PasswordResetService {
     senderName: string,
     trackingId: string,
   ): Promise<void> {
-    const token = await this.createGrant(user);
-    const url = `${this.webBaseUrl()}/reset-password?token=${token}`;
+    const token = await this.createGrant(user, CLAIM_EXPIRY_DAYS * 24 * 60);
+    const url = `${webBaseUrl(this.config)}/reset-password?token=${token}`;
     const { subject, html, text } = claimAccountTemplate(
       user.name,
       senderName,
       trackingId,
       url,
-      EXPIRY_MINUTES,
+      `${CLAIM_EXPIRY_DAYS} days`,
     );
 
     try {
@@ -98,8 +105,18 @@ export class PasswordResetService {
       );
     }
 
-    grant.usedAt = new Date();
-    await this.resetRepository.save(grant);
+    // Conditional on still being unused, so a link opened twice at once is
+    // spent exactly once.
+    const claimed = await this.resetRepository.update(
+      { id: grant.id, usedAt: IsNull() },
+      { usedAt: new Date() },
+    );
+
+    if (!claimed.affected) {
+      throw new BadRequestException(
+        'This reset link is invalid or has expired — request a new one',
+      );
+    }
 
     return grant;
   }
@@ -113,7 +130,10 @@ export class PasswordResetService {
   }
 
   /** Spends any outstanding grant, then mints a fresh one. */
-  private async createGrant(user: User): Promise<string> {
+  private async createGrant(
+    user: User,
+    expiryMinutes: number,
+  ): Promise<string> {
     await this.spendAllForUser(user.id);
 
     const token = randomBytes(32).toString('hex');
@@ -121,7 +141,7 @@ export class PasswordResetService {
       this.resetRepository.create({
         user,
         tokenHash: hashToken(token),
-        expiresAt: new Date(Date.now() + EXPIRY_MINUTES * 60_000),
+        expiresAt: new Date(Date.now() + expiryMinutes * 60_000),
         usedAt: null,
       }),
     );
@@ -134,23 +154,5 @@ export class PasswordResetService {
       { user: { id: userId }, usedAt: IsNull() },
       { usedAt: new Date() },
     );
-  }
-
-  /** Where the reset link points — the frontend, not this API. */
-  private webBaseUrl(): string {
-    const explicit = this.config.get<string>('FRONTEND_URL');
-    if (explicit) return explicit.replace(/\/+$/, '');
-
-    const firstCorsOrigin = this.config
-      .get<string>('CORS_ORIGIN')
-      ?.split(',')[0]
-      ?.trim();
-
-    if (firstCorsOrigin) return firstCorsOrigin.replace(/\/+$/, '');
-
-    this.logger.warn(
-      'Neither FRONTEND_URL nor CORS_ORIGIN is set — reset links will point at localhost',
-    );
-    return 'http://localhost:3001';
   }
 }

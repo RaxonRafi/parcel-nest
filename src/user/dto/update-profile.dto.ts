@@ -10,6 +10,7 @@ import {
   MaxLength,
 } from 'class-validator';
 import { PHONE_REGEX } from '../../common/constants/validation.constants';
+import { trimString } from '../../common/utils/trim.transform';
 
 export class UpdateProfileDto {
   @ApiPropertyOptional({ example: 'John Sender' })
@@ -17,7 +18,7 @@ export class UpdateProfileDto {
   @IsString()
   @IsNotEmpty()
   @MaxLength(120)
-  @Transform(({ value }) => (typeof value === 'string' ? value.trim() : value))
+  @Transform(trimString)
   name?: string;
 
   @ApiPropertyOptional({ example: '+8801700000000' })

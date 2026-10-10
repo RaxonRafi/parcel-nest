@@ -4,6 +4,9 @@ import {
   Logger,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import { EmailVerificationService } from '../../auth/services/email-verification.service';
+import { PasswordResetService } from '../../auth/services/password-reset.service';
+import { SessionService } from '../../auth/services/session.service';
 import { createClient, SupabaseClient } from '@supabase/supabase-js';
 
 const KEEP_ALIVE_ROW_ID = 1;
@@ -13,7 +16,36 @@ export class KeepAliveService {
   private readonly logger = new Logger(KeepAliveService.name);
   private client: SupabaseClient | null = null;
 
-  constructor(private readonly config: ConfigService) {}
+  constructor(
+    private readonly config: ConfigService,
+    private readonly sessionService: SessionService,
+    private readonly passwordResetService: PasswordResetService,
+    private readonly emailVerificationService: EmailVerificationService,
+  ) {}
+
+  /**
+   * Deletes expired refresh tokens and single-use grants. Nothing reads an
+   * expired row again, so without this the three tables only ever grow.
+   *
+   * Never throws: housekeeping failing must not fail the keep-alive ping.
+   */
+  async pruneExpiredTokens(): Promise<number> {
+    try {
+      const removed = await Promise.all([
+        this.sessionService.pruneExpired(),
+        this.passwordResetService.pruneExpired(),
+        this.emailVerificationService.pruneExpired(),
+      ]);
+      const total = removed.reduce((sum, count) => sum + count, 0);
+
+      this.logger.log(`Pruned ${total} expired token rows`);
+      return total;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Unknown error';
+      this.logger.error(`Token pruning failed: ${message}`);
+      return 0;
+    }
+  }
 
   private getClient(): SupabaseClient {
     if (this.client) return this.client;
