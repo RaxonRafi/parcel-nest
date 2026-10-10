@@ -17,6 +17,7 @@ Sections are ordered by how likely they are to break something that works today.
 - [8. Realtime](#8-realtime)
 - [9. Errors and rate limits](#9-errors-and-rate-limits)
 - [10. Backend steps before the client ships](#10-backend-steps-before-the-client-ships)
+- [11. Second pass: the improvements release](#11-second-pass-the-improvements-release)
 
 ---
 
@@ -489,8 +490,17 @@ good practice, but ordinary browsing no longer needs special care.
 These are on the API side, listed here because the client's behaviour depends
 on them.
 
-1. **Run the migrations.** Done on the development database on 2026-10-10;
-   repeat on any other environment. `npm run migration:run` applies two:
+0. **Run the two new migrations before deploying the improvements release.**
+   `1787876100000-AuthHardening` and
+   `1787876200000-NotificationsContactAndFeeBreakdown` are **not applied
+   yet**. The new code reads columns they add, so deploying it first breaks
+   sign-in. They only add columns and tables, so the *current* code keeps
+   working once they are in: migrate first, then deploy. See
+   [11](#11-second-pass-the-improvements-release).
+
+1. **Run the earlier migrations.** Done on the development database on
+   2026-10-10; repeat on any other environment. `npm run migration:run`
+   applies two:
 
    - `1787875900000-TimestamptzAndParcelPartyIndexes`: the original
      `createdAt`/`updatedAt` columns become `timestamptz` and two indexes are
@@ -536,3 +546,77 @@ development database and the real Pinecone index:
 One gap: HuggingFace was out of credits, so the Pinecone checks used stand-in
 vectors. Storage, filtering and deletion are confirmed; answer quality with
 real embeddings is not.
+
+---
+
+## 11. Second pass: the improvements release
+
+A second change set on the same day worked through the "improvements" list in
+[`PROJECT_REVIEW.md`](./PROJECT_REVIEW.md). The client in `percel-client` has
+already been updated for everything marked **done**; the rest is optional.
+
+### Breaks an unchanged client
+
+| Change | What to do | Client |
+| --- | --- | --- |
+| **Parcel lists have no `statusLogs`.** | Fetch `GET /api/parcels/:trackingId/details` when a row is opened. | done |
+| **`PICKED_UP` needs a courier.** `PATCH …/status` answers `400` until one is assigned — for admins too. | Disable that option until `deliveryPersonnel` is set. | done |
+| **Courier approval needs an ID.** `…/delivery/approve` answers `400` until the applicant has `nidNumber` and a `nidImage`. | Let applicants add a photo URL on their profile; show the error to the admin. | done |
+| **Passwords have rules** at register, change and reset: 8–72 characters with upper case, lower case and a number. | Say so next to the field; the API's message is displayable as it is. | done |
+| **The public tracking page is masked.** Names are "Jane D.", addresses are the area only. | Nothing to change, but do not expect a street address there. A signed-in party gets the full record from `details`. | no change needed |
+| **`GET /api` is liveness only.** | Use `GET /api/health` for a real check. | done |
+
+### New, and used by the client
+
+- **Notification inbox.** `GET /api/notifications`, `…/unread-count`,
+  `PATCH …/:id/read`, `PATCH …/read-all`. The bell loads from it on sign-in,
+  so nothing is lost while the tab was closed.
+- **No more failed socket on Vercel.** `GET /api/health` returns
+  `realtime: false` on a serverless host. The client asks first and only opens
+  a Socket.IO connection when it is `true`; otherwise it re-reads the inbox
+  every minute and on window focus. This is what removes the
+  `WebSocket connection to 'wss://…/socket.io/' failed` console error.
+- **Price preview.** `POST /api/parcels/quote` — the new-shipment form shows
+  the fee and its breakdown as the weight is typed.
+- **`feeBreakdown`** on every parcel booked from now on (older ones: `null`).
+- **Follow-up questions.** `ask` and `ask/stream` accept `history`; the chat
+  widget sends the last ten turns.
+- **Profile:** `emailNotifications` (opt out of parcel emails), a list of
+  signed-in devices with sign-out per device (`GET/DELETE /api/auth/sessions`),
+  and delete-my-account (`DELETE /api/users/me` with the password).
+- **Admin cancel and "my parcels"** for parcels the admin booked themselves.
+- **Contact form honeypot** — an off-screen `website` field.
+- **Audit filter** lists the new actions.
+
+### New, and not used by the client yet
+
+- **The refresh cookie.** `login`, `register` and `refresh-token` now also set
+  the refresh token as an `httpOnly` cookie. The client still keeps the token
+  from the body in storage. To move over: send auth requests with
+  `credentials: 'include'`, stop storing the refresh token, call
+  `refresh-token` with an empty body, send `{ everywhere: true }` to sign out
+  everywhere, then set `REFRESH_TOKEN_IN_BODY=false` on the API. Note that the
+  client and API are on different sites in production, so this relies on a
+  third-party cookie, which Safari and some privacy modes block — test before
+  switching the body off.
+- **Admin user editing and deleting** (`PATCH` / `DELETE /api/users/:id`). The
+  API client has `adminUpdateUser` and `adminDeleteUser`; no screen calls them.
+- **Contact messages for admins** (`GET /api/contact/messages`,
+  `api.getContactMessages`). No screen yet.
+- **`markNotificationRead`** for a single item; the bell marks all on close.
+
+### New status codes to expect
+
+- `429` from **login** can now mean the account is locked (five wrong
+  passwords, 15 minutes). The message says how long is left.
+- `500` bodies carry a `requestId`, also in the `X-Request-Id` response
+  header. Worth showing in an error state so it can be quoted.
+- `403` on booking a parcel, only if the API is run with
+  `REQUIRE_VERIFIED_EMAIL=true`.
+
+### Sign-out after token reuse
+
+If a refresh token that was already rotated is presented again, the API ends
+every session in that chain. The client's single-flight refresh already
+prevents this within one tab. Two *tabs* refreshing in the same few seconds
+are tolerated; the loser gets a `401` and the user signs in again in that tab.

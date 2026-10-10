@@ -61,9 +61,10 @@ src/
 │   ├── dto/                    # PaginationQueryDto and friends
 │   ├── guards/                 # JwtAuthGuard, RolesGuard
 │   ├── constants/  types/  utils/
+├── common/background/          # Runs work behind the response (mail, indexing, notifications)
 ├── mail/                       # SMTP transport + email templates
 ├── realtime/                   # Socket.IO gateway + the service that pushes events
-├── <feature>/                  # user, auth, token, parcel, dashboard, audit, rag, contact, keep-alive
+├── <feature>/                  # user, auth, token, parcel, notification, dashboard, audit, rag, contact, keep-alive
 │   ├── controllers/            # HTTP layer only — no business logic
 │   ├── services/               # Business logic; the only place repositories live
 │   ├── entities/               # TypeORM entities owned by this module
@@ -85,6 +86,8 @@ that owns a table calls `TypeOrmModule.forFeature` for it:
 | `parcel` | `parcels`, `parcel_status_logs`                              |
 | `auth`   | `refresh_tokens`, `password_resets`, `email_verifications`   |
 | `audit`  | `audit_logs`                                                 |
+| `notification` | `notifications`                                        |
+| `contact` | `contact_messages`                                          |
 
 Everything else asks the owning service. `DashboardService` injects no
 repository at all and composes `UserService.getStats()` with
@@ -98,6 +101,8 @@ it that way, and both are worth knowing about before you add an import:
   UserModule`, so `UserModule` importing `AuthModule` would be a cycle.
 - `AuditRecorderModule` — `AuditService` without `AuditModule`'s controller,
   for the same reason.
+- `NotificationStoreModule` — `NotificationService` without the inbox
+  controller, for modules that only write notifications.
 
 ```
 TokenModule ─┬─> UserModule ─> AccessControlModule ─┬─> AuthModule
@@ -120,9 +125,23 @@ are stored as SHA-256 hashes in `refresh_tokens`, and **rotate**: calling
 Logout revokes one session or all of them; changing or resetting a password ends
 every session.
 
+- **Reuse detection.** Every token in one rotation chain shares a family. A
+  token that was already rotated away turning up again means the chain was
+  copied, so the whole family is ended. (Two tabs refreshing within a few
+  seconds of each other are forgiven.)
+- **The refresh token is also an `httpOnly` cookie**, scoped to `/api/auth`.
+  It stays in the JSON body too until `REFRESH_TOKEN_IN_BODY=false`.
+- **Lockout.** Five wrong passwords in a row lock an account for 15 minutes;
+  the per-IP throttle alone does nothing against guesses from many addresses.
+- **Password rules** on register, change and reset: 8–72 characters with an
+  uppercase letter, a lowercase letter and a number.
+- **Devices.** `GET /api/auth/sessions` lists a user's live sessions and
+  `DELETE /api/auth/sessions/:id` ends one.
+
 New accounts start with `isVerified: false` and are emailed a confirmation link.
-No route requires a verified address yet — that is a one-line guard when you
-want it.
+Set `REQUIRE_VERIFIED_EMAIL=true` to refuse booking a parcel, and approving a
+courier, until the address is confirmed — off by default, because it only makes
+sense with working SMTP.
 
 ---
 
@@ -159,15 +178,22 @@ regularly, move to the transaction-mode pooler on port `6543`.
 without `SMTP_HOST` it logs what it would have sent instead of throwing, so the
 password-reset flow is exercisable without credentials.
 
-Every send is fire-and-forget: a delivery failure is logged and never fails the
-write that triggered it. That is not tidiness — if `forgot-password` threw on a
-mail error it would return `500` for registered addresses and `200` for unknown
-ones, which is exactly the account-enumeration signal the generic response
-exists to hide.
+Every send is queued behind the response (`MailService.queue`): a delivery
+failure is logged and never fails, or slows, the write that triggered it. That
+is not tidiness — if `forgot-password` threw on a mail error, or just took
+longer for registered addresses, it would hand back exactly the
+account-enumeration signal the generic response exists to hide.
+
+On Vercel the queued work is handed to the platform's `waitUntil`, so the
+function is kept alive until it finishes; on a long-running host it simply
+runs, and is drained on shutdown.
 
 Sent on: account creation (confirm your email), a parcel booked for an
 unregistered receiver (claim your account), parcel reaching `PICKED_UP` /
-`OUT_FOR_DELIVERY` / `DELIVERED` / `CANCELLED`, and password reset.
+`OUT_FOR_DELIVERY` / `DELIVERED` / `CANCELLED` (unless the user turned
+`emailNotifications` off), a courier application being approved or rejected,
+password reset, and the contact form (to support, with the visitor as
+reply-to).
 
 > Gmail app passwords are displayed in spaced groups of four and rejected unless
 > the spaces are stripped — `MailService` strips them, so paste as shown. Gmail
@@ -204,7 +230,10 @@ Postgres — run it once after changing what is indexed, or to fill an empty
 index.
 
 `POST /api/rag/ask` returns a complete answer; `POST /api/rag/ask/stream`
-returns the same thing as server-sent events, sources first, then tokens.
+returns the same thing as server-sent events, sources first, then tokens. Both
+take an optional `history` so a follow-up question keeps its subject. When
+retrieval finds nothing, the answer is "I don't have that information." without
+calling the model.
 
 Index-mutating routes are admin-only. `ask` requires any signed-in user, because
 each call bills an embedding and a completion.
@@ -221,7 +250,16 @@ each call bills an embedding and a completion.
 ```bash
 npm test              # unit tests
 npm run test:api      # e2e against in-memory Postgres (pg-mem, no live database)
+npm run test:live     # read-only SQL checks against the database in .env
 ```
+
+`test:live` exists because the dashboard trends are hand-written Postgres that
+the in-memory database cannot run. It only reads, and skips itself when no
+database is configured.
+
+`.github/workflows/ci.yml` runs lint, type-check, unit and e2e on every push,
+and in a second job applies every migration to a fresh Postgres 16 container
+and runs `test:live` against it.
 
 ---
 
@@ -241,6 +279,32 @@ Vercel, configured by `vercel.json`, which builds `src/main.ts` with
 
 A daily cron hits `/api/keep-alive` so Supabase does not pause the project. It
 authenticates with `CRON_SECRET`, not a user JWT.
+
+### A long-running host
+
+The `Dockerfile` builds an image for hosts that keep a process alive (Render,
+Railway, Fly, a VPS) — which is what realtime needs.
+
+```bash
+docker build -t parcel-api .
+docker run --env-file .env -p 3000:3000 parcel-api
+```
+
+Set `DB_MIGRATIONS_RUN=true` to apply migrations on boot, or run them as a
+release step. With more than one instance, set `REDIS_URL` so rate-limit
+counters and Socket.IO rooms are shared between them.
+
+### Operations
+
+- `GET /api/health` runs a query against the database: `200` when it answers,
+  `503` when it does not. It also reports whether the assistant, mail and
+  realtime are available.
+- Every response has an `X-Request-Id`. Each request is logged with it, and so
+  is any unexpected error — whose `500` body carries the same id.
+- The environment is validated at boot: a missing secret stops the process
+  with a list of what is wrong, instead of failing the first login.
+- Swagger stays on by default. `SWAGGER_ENABLED=false` removes it;
+  `SWAGGER_USER` + `SWAGGER_PASSWORD` put HTTP Basic auth in front of it.
 
 ---
 

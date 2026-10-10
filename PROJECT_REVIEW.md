@@ -12,7 +12,8 @@ that left open. Both are merged to `master`. Client-facing effects are in
 [`FRONTEND_GUIDE.md`](./FRONTEND_GUIDE.md).
 
 State after the fixes: `npm run lint` clean, `npx tsc --noEmit` clean,
-`nest build` clean, 175 unit tests and 47 e2e tests passing.
+`nest build` clean, 175 unit tests and 47 e2e tests passing. (The improvements
+pass further down took that to 385 and 79.)
 
 ### Fixed
 
@@ -106,7 +107,8 @@ Re-checked at the end of 2026-10-10. In the order they need doing:
    questions as a sender, a receiver and an admin after step 2.
 4. **Production database:** the migrations were verified on the database in the
    local `.env` only. Run `npm run migration:show` against any other one.
-5. `sqlite3` is a dev dependency that nothing imports any more; remove it.
+5. **Run the two migrations from the improvements pass** before deploying
+   it — see the next section.
 
 **Not a defect, recorded so it is not "fixed" by mistake:** audit writes stay
 outside the parcel transaction on purpose. A failed audit insert must not undo
@@ -116,60 +118,112 @@ the action it describes.
 
 ## 🔧 Improvements to existing features
 
+Worked through on 2026-10-10. State afterwards: lint, type-check (now
+`strict`) and build clean; 385 unit tests, 79 e2e tests and 9 live SQL tests
+passing. The client-facing delta is section 11 of
+[`FRONTEND_GUIDE.md`](./FRONTEND_GUIDE.md).
+
+### Before deploying this
+
+1. **Run the two new migrations first**: `npm run migration:run` applies
+   `AuthHardening` and `NotificationsContactAndFeeBreakdown`. They are not
+   applied anywhere yet. The new code reads columns they add, so deploying it
+   before migrating breaks sign-in; the old code is unaffected by them, so
+   migrate, then deploy. Both were run up and down inside a rolled-back
+   transaction on the development database and passed.
+2. **Courier applicants need an ID on file** to be approved from now on. The
+   three seeded applicants have none.
+
+### Done
+
 **Auth and accounts**
-- Enforce `isVerified` where it matters (creating parcels, courier approval).
-- Refresh-token reuse detection: presenting an already-rotated token should
-  revoke the whole session family, not just fail.
-- Deliver the refresh token in an `httpOnly` cookie instead of the JSON body.
-- Password strength rules beyond length; per-account lockout after repeated
-  failures (the throttle is per IP only).
-- Expose the unused `softDeleteUser` / `updateUser` as "delete my account" and
-  admin user editing; add a "list my sessions / sign out this device" view.
-- Courier approval should require `nidNumber` and `nidImage`, and email the
-  applicant the decision.
+- `isVerified` is enforced on booking a parcel and on courier approval when
+  `REQUIRE_VERIFIED_EMAIL=true`. Off by default: it locks everyone out of
+  booking unless mail is actually being delivered.
+- Refresh-token reuse detection. Tokens in one rotation chain share a family;
+  a rotated token presented again ends the family.
+- The refresh token is set as an `httpOnly` cookie. It is still in the JSON
+  body until `REFRESH_TOKEN_IN_BODY=false`, so the current client keeps
+  working.
+- Password rules (8–72 characters, upper case, lower case, a number) and a
+  per-account lockout: five wrong passwords, 15 minutes.
+- `DELETE /api/users/me` (with password), admin `PATCH` / `DELETE
+  /api/users/:id`, and `GET` / `DELETE /api/auth/sessions`.
+- Courier approval requires `nidNumber` and `nidImage`, and emails the
+  applicant either decision.
 
 **Parcels**
-- Authenticated `GET /api/parcels/:trackingId/details` for the owner — today the
-  only single-parcel read is the trimmed public one.
-- Require an assigned courier before `PICKED_UP`; let admins use `cancel` and
-  `my-parcels` for parcels they created.
-- Mask the public tracking response to city/area rather than full pickup and
-  delivery addresses and full names.
-- Return the fee breakdown `calculateDeliveryFee` already computes, and add a
-  `POST /api/parcels/quote` so the client can show a price before booking.
-- Drop `statusLogs` + `changedBy` from list queries (five joins per page) and
-  load them on the detail route only. Escape `%` / `_` in search terms.
-- Audit cancel, confirm, proof submission and parcel creation, not only admin
-  actions.
+- `GET /api/parcels/:trackingId/details` for an admin or the parcel's parties.
+- A courier must be assigned before `PICKED_UP`; admins can use `cancel` and
+  `my-parcels` for parcels they booked.
+- The public tracking response is masked to area and "Jane D.".
+- `feeBreakdown` is stored at booking and returned; `POST /api/parcels/quote`.
+- Lists no longer load `statusLogs` and their authors. `%` and `_` in a search
+  are literal.
+- Booking, cancelling, confirming and proof submission are audited.
 
 **Notifications and mail**
-- Move SMTP sends and RAG indexing off the request path (BullMQ, or `waitUntil`
-  on Vercel). Today each parcel write awaits two emails plus an embedding call.
-- Persist notifications so a missed socket push is not lost; add an unread
-  count and per-user email preferences.
-- Set `replyTo` on contact-form mail, store messages in a table, and add a
-  honeypot or captcha.
+- Mail, assistant indexing and notifications run behind the response
+  (`BackgroundService`, using Vercel's `waitUntil` there).
+- Notifications are stored per user, with an inbox, an unread count and
+  mark-read routes; the live push carries the stored id. `emailNotifications`
+  is the per-user opt-out for parcel emails.
+- Contact messages are stored (admins: `GET /api/contact/messages`), sent with
+  the visitor as reply-to, and protected by a honeypot field.
 
 **RAG**
-- Add conversation history; return "no sources" instead of calling the model
-  when retrieval is empty; verify PDF magic bytes, not just the client MIME type.
-- Index the seed data (`POST /api/parcels/reindex` now does it on demand), and
-  have that route drop vectors whose parcel no longer exists.
+- `history` on both ask routes; no completion is billed when retrieval finds
+  nothing; uploaded PDFs are checked by their first bytes.
+- `POST /api/parcels/reindex` also removes vectors whose parcel is gone.
 
 **Platform**
-- Validate env at boot (Joi/zod schema in `ConfigModule`) instead of
-  `getOrThrow` failing on the first request that needs a value.
-- `helmet`, a catch-all exception filter, request logging with a request id, `enableShutdownHooks`, and a real `/api/health` that checks the
-  database (the current one returns "Hello World!").
-- Redis-backed throttler storage and Socket.IO adapter so both work across
-  instances.
-- Gate Swagger UI in production.
-- Turn on `strict` in `tsconfig.json` (`noImplicitAny` is off).
-- More tests: an automated run of dashboard trends against a real Postgres (it
-  has only been checked by hand), password reset and email verification
-  services, mail templates.
-- CI (lint, type-check, unit, e2e against a Postgres service container) and a
-  `Dockerfile` — realtime needs a long-running host, which Vercel is not.
+- Environment validated at boot.
+- `helmet`, one catch-all exception filter, request ids with a log line per
+  request, shutdown hooks, and `GET /api/health` that queries the database.
+- Optional Redis (`REDIS_URL`) for throttler storage and the Socket.IO
+  adapter.
+- Swagger can be switched off or put behind Basic auth.
+- `strict` is on in `tsconfig.json`.
+- New tests: password reset, email verification, mail templates, and the
+  trend queries against a real Postgres (`npm run test:live`).
+- CI workflow and a `Dockerfile`.
+- `sqlite3`, an unused dev dependency, removed.
+
+### Built but not verified end to end
+
+- **Redis.** No Redis was available to test against. The code paths are
+  exercised only as far as type-checking and a boot without `REDIS_URL`.
+- **The CI workflow and the `Dockerfile`** have not been run: Docker was not
+  running on the development machine, and the workflow runs on GitHub.
+- **Vercel `waitUntil`.** Unit-tested against a stand-in for Vercel's request
+  context, not on Vercel itself. If queued mail stops arriving there, this is
+  the first place to look.
+- **The refresh cookie across sites.** Verified against the API directly. In
+  production the client is on another site, where the cookie is a third-party
+  cookie that some browsers block — which is why the body token stays on.
+- **The assistant's new behaviour with a real model.** HuggingFace is still
+  out of credits, so `history` and the no-sources path are unit-tested only.
+
+### Deliberately different from the original note
+
+- **Swagger is not gated by default.** The live docs are part of what this
+  project shows, so the gate is opt-in.
+- **`isVerified` enforcement is opt-in**, for the reason above.
+- **The refresh token is delivered in a cookie *as well as* the body**, not
+  instead of it, until the client moves over.
+- **Background work uses `waitUntil`, not BullMQ.** A queue needs a worker
+  process, which Vercel does not have.
+- **No captcha** on the contact form — a honeypot only. A captcha needs a
+  third-party account and a client widget.
+
+### Still worth doing
+
+- Move the client to the refresh cookie and switch the body token off.
+- Client screens for admin user editing and for reading contact messages.
+- A separate "condense the follow-up into a standalone question" step for the
+  assistant; today retrieval just searches with the previous question too.
+- Per-notification email preferences (today it is one switch).
+- An upload endpoint for ID photos and delivery proof — they are URL fields.
 
 ---
 

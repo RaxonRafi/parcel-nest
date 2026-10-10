@@ -50,9 +50,16 @@ describeLive('Dashboard trends against a real Postgres', () => {
     await dataSource?.destroy();
   });
 
-  const countSince = async (column: string, since: Date): Promise<number> => {
+  /**
+   * Rows the chart is meant to show: from `since` up to the end of today.
+   * The upper bound matters — the series stops at CURRENT_DATE, so a row
+   * dated later is rightly absent from it, and counting it here would make a
+   * correct query look wrong.
+   */
+  const countInWindow = async (column: string, since: Date): Promise<number> => {
     const [row] = await parcels.query<{ n: number }[]>(
-      `SELECT count(*)::int AS n FROM parcels WHERE "${column}" >= $1`,
+      `SELECT count(*)::int AS n FROM parcels
+        WHERE "${column}" >= $1 AND "${column}"::date <= CURRENT_DATE`,
       [since],
     );
     return row.n;
@@ -103,8 +110,8 @@ describeLive('Dashboard trends against a real Postgres', () => {
       const since = new Date(Date.now() - days * 86_400_000);
       const [trends, created, delivered] = await Promise.all([
         service.getTrends(days),
-        countSince('createdAt', since),
-        countSince('deliveredAt', since),
+        countInWindow('createdAt', since),
+        countInWindow('deliveredAt', since),
       ]);
       const total = (key: 'created' | 'delivered') =>
         trends.daily.reduce((sum, day) => sum + day[key], 0);
