@@ -369,9 +369,9 @@ So a sender asking about someone else's tracking code now gets "I don't have
 that information" and an empty or PDF-only `sources` list. That is the
 intended result, not an error; show the answer as it comes.
 
-Parcels indexed before this release carry no owner information and are
-invisible to non-admins until re-indexed (see
-[10](#10-backend-steps-before-the-client-ships)).
+A parcel that is not in the assistant's index is invisible to it, and so far
+almost none are: see step 2 in
+[10](#10-backend-steps-before-the-client-ships).
 
 ### `503` when the assistant is switched off
 
@@ -408,6 +408,14 @@ The stream event format (`sources`, `token`, `done`, `error`) is unchanged.
 fields per parcel: `senderId`, `receiverId`, `courierId` (uuids). Send them if
 you have an admin re-index tool, otherwise the parcel is only visible to
 admins.
+
+### Admin: rebuild the whole index (new)
+
+`POST /api/parcels/reindex`, no body, admin only. Returns
+`{ message: string; indexed: number }`. The server reads every parcel from the
+database itself, so the client sends nothing. Worth a button on the admin
+assistant screen; it can take several seconds, and answers `503` when the
+assistant is switched off.
 
 ---
 
@@ -481,7 +489,8 @@ good practice, but ordinary browsing no longer needs special care.
 These are on the API side, listed here because the client's behaviour depends
 on them.
 
-1. **Run the migrations.** `npm run migration:run` applies two:
+1. **Run the migrations.** Done on the development database on 2026-10-10;
+   repeat on any other environment. `npm run migration:run` applies two:
 
    - `1787875900000-TimestamptzAndParcelPartyIndexes`: the original
      `createdAt`/`updatedAt` columns become `timestamptz` and two indexes are
@@ -496,10 +505,13 @@ on them.
    instants (`…Z`) regardless of where the API runs. If the client was
    compensating for an offset in development, remove that.
 
-2. **Re-index parcels for the assistant.** Existing vectors have no owner ids,
-   so non-admin users cannot retrieve their own older parcels. Each parcel
-   re-indexes itself on its next change; to fix them all at once, post them to
-   `POST /api/rag/index/bulk` with `senderId`, `receiverId` and `courierId`.
+2. **Re-index parcels for the assistant. Not done yet.** Only 4 of the 204
+   parcels are in the index (those 4 now carry owner ids). The rest are
+   invisible to the assistant for everyone until an admin calls
+   `POST /api/parcels/reindex`. That call is blocked for now: the HuggingFace
+   account that produces embeddings has no credits left (`402`), which also
+   means `ask` and `ask/stream` fail on every real question until it is topped
+   up or the key is replaced.
 
 3. **Set `TRUST_PROXY=1`** on a host behind a reverse proxy (Render, Railway,
    nginx). Without it all users share one rate-limit bucket. Vercel is
@@ -508,13 +520,19 @@ on them.
 4. **`CORS_ORIGIN`** may now contain spaces after commas
    (`https://a.com, https://b.com`).
 
-### Not yet verified against live services
+### Verified against live services
 
 The automated suites run on an in-memory Postgres with mail and AI providers
-switched off, so three things were changed without being exercised end to end.
-Check them once on a real environment:
+switched off, so these were checked by hand on 2026-10-10 against the
+development database and the real Pinecone index:
 
-- the migration above, on a copy of the real database;
-- the `dashboard/trends` SQL (the in-memory database cannot run it);
-- PDF re-upload and delete, and per-user parcel answers, against a real
-  Pinecone index.
+- both migrations applied; timestamps are `timestamptz`, the two indexes
+  exist, and no delivered parcel is missing `deliveredAt`;
+- the `dashboard/trends` SQL runs for 7, 30 and 90 days, and its daily totals
+  match the table;
+- per-user parcel retrieval, PDF upload, a shorter re-upload replacing the old
+  chunks, and PDF delete all behave on Pinecone.
+
+One gap: HuggingFace was out of credits, so the Pinecone checks used stand-in
+vectors. Storage, filtering and deletion are confirmed; answer quality with
+real embeddings is not.

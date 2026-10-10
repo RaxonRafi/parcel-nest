@@ -111,3 +111,11 @@ export class PaginatedParcelsDto {
   @ApiProperty({ type: PageMetaDto })
   meta!: PageMetaDto;
 }
+
+export class ReindexResponseDto {
+  @ApiProperty({ example: '204 parcels re-indexed' })
+  message!: string;
+
+  @ApiProperty({ example: 204 })
+  indexed!: number;
+}

@@ -15,6 +15,7 @@ import {
   ApiResponse,
   ApiTags,
 } from '@nestjs/swagger';
+import { Throttle } from '@nestjs/throttler';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { Roles } from '../../common/decorators/roles.decorator';
 import { JwtAuthGuard } from '../../common/guards/jwt-auth.guard';
@@ -30,6 +31,7 @@ import { CreateParcelDto } from '../dto/create-parcel.dto';
 import {
   PaginatedParcelsDto,
   ParcelResponseDto,
+  ReindexResponseDto,
 } from '../dto/parcel-response.dto';
 import { PublicParcelResponseDto } from '../dto/public-parcel-response.dto';
 import { UpdateParcelStatusDto } from '../dto/update-parcel-status.dto';
@@ -297,6 +299,23 @@ export class ParcelController {
   @Get()
   getAllParcels(@Query() query: QueryParcelsDto): Promise<Paginated<Parcel>> {
     return this.parcelService.getAllParcels(query);
+  }
+
+  @ApiBearerAuth(JWT_AUTH)
+  @ApiOperation({
+    summary: 'Rebuild the assistant index from the database',
+    description:
+      'Admin only. Re-indexes every parcel with its sender, receiver and courier, so the assistant can show each one to its own parties. Safe to repeat.',
+  })
+  @ApiResponse({ status: 201, type: ReindexResponseDto })
+  @ApiResponse({ status: 503, description: 'Assistant is not configured' })
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(Role.ADMIN)
+  @Throttle({ ai: { limit: 20, ttl: 60_000 } })
+  @Post('reindex')
+  async reindexAll(): Promise<ReindexResponseDto> {
+    const { indexed } = await this.parcelService.reindexAll();
+    return { message: `${indexed} parcels re-indexed`, indexed };
   }
 
   @ApiBearerAuth(JWT_AUTH)

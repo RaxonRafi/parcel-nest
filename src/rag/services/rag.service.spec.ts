@@ -62,6 +62,48 @@ describe('RagService', () => {
   });
 });
 
+describe('RagService — parcel indexing', () => {
+  const parcel = (id: string, parties: Record<string, string> = {}) => ({
+    id,
+    trackingCode: `TRK-${id}`,
+    status: 'PENDING',
+    origin: 'Dhaka',
+    destination: 'Sylhet',
+    recipientName: 'Jane',
+    updatedAt: '2026-10-01T00:00:00.000Z',
+    ...parties,
+  });
+
+  it('upserts a batch in one call, keyed by parcel and tagged with its parties', async () => {
+    const service = new RagService({} as ConfigService);
+    const addDocuments = jest.fn();
+    (service as unknown as { vectorStore: unknown }).vectorStore = {
+      addDocuments,
+    };
+
+    await service.indexParcels([
+      parcel('a', { senderId: 's-1', receiverId: 'r-1', courierId: 'c-1' }),
+      parcel('b', { senderId: 's-2' }),
+    ]);
+
+    expect(addDocuments).toHaveBeenCalledTimes(1);
+    const [docs, options] = addDocuments.mock.calls[0] as [
+      { metadata: Record<string, unknown> }[],
+      { ids: string[] },
+    ];
+    expect(options.ids).toEqual(['parcel-a', 'parcel-b']);
+    expect(docs[0].metadata).toMatchObject({
+      type: 'parcel',
+      sender_id: 's-1',
+      receiver_id: 'r-1',
+      courier_id: 'c-1',
+    });
+    // Pinecone rejects null metadata, so an absent party has no key at all.
+    expect(docs[1].metadata).not.toHaveProperty('receiver_id');
+    expect(docs[1].metadata).not.toHaveProperty('courier_id');
+  });
+});
+
 describe('buildRetrievalFilter', () => {
   const admin = { id: 'admin-1', role: Role.ADMIN };
   const sender = { id: 'user-1', role: Role.SENDER };

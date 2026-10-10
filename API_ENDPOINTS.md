@@ -228,6 +228,7 @@ them to `SENDER` so the account stays usable and they can apply again.
 | ADMIN | `PATCH` | `/api/parcels/:trackingId/unblock` | `Parcel` |
 | ADMIN | `PATCH` | `/api/parcels/:trackingId/assign` | `Parcel` — body `{ deliveryPersonnelId }` |
 | ADMIN | `PATCH` | `/api/parcels/:trackingId/unassign` | `Parcel` |
+| ADMIN | `POST` | `/api/parcels/reindex` | `{ message: string; indexed: number }` — rebuilds the assistant index, see [RAG](#rag) |
 | ADMIN, DELIVERY_PERSONNEL | `PATCH` | `/api/parcels/:trackingId/status` | `Parcel` |
 | ADMIN, DELIVERY_PERSONNEL | `PATCH` | `/api/parcels/:trackingId/delivery-proof` | `Parcel` |
 | DELIVERY_PERSONNEL | `GET` | `/api/parcels/assigned-parcels` | `Paginated<Parcel>` — active queue |
@@ -414,6 +415,11 @@ already been sent by then. Closing the connection stops token generation.
 > or courier. `index/parcel` and `index/bulk` accept optional `senderId`,
 > `receiverId` and `courierId`; a parcel indexed without them is visible to
 > admins alone.
+
+> **Rebuilding the index.** `POST /api/parcels/reindex` (admin, no body)
+> re-indexes every parcel from the database with its owner ids, 50 per
+> embedding call. It is safe to repeat. It answers `503` when the assistant is
+> switched off, and fails if the embedding provider refuses the request.
 
 > Without `PINECONE_API_KEY`, `PINECONE_INDEX`, `HUGGINGFACE_API_KEY` and
 > `GROQ_API_KEY` the assistant is switched off: both ask routes answer `503`

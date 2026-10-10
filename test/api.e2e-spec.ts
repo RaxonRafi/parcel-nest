@@ -653,5 +653,20 @@ describe('API (e2e)', () => {
 
       expect((res.body as MessageBody).message).toMatch(/not configured/);
     });
+
+    it('keeps the index rebuild to admins', async () => {
+      await request(server).post('/api/parcels/reindex').expect(401);
+      await request(server)
+        .post('/api/parcels/reindex')
+        .set(authHeader(users.sender.token))
+        .expect(403);
+    });
+
+    it('answers 503 on the index rebuild when no provider keys are configured', async () => {
+      await request(server)
+        .post('/api/parcels/reindex')
+        .set(authHeader(users.admin.token))
+        .expect(503);
+    });
   });
 });

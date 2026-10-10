@@ -14,6 +14,7 @@ import {
   In,
   IsNull,
   LessThanOrEqual,
+  MoreThan,
   MoreThanOrEqual,
   Not,
   Repository,
@@ -79,6 +80,9 @@ function dateRange(from?: string, to?: string): FindOperator<Date> | undefined {
   if (to) return LessThanOrEqual(new Date(to));
   return undefined;
 }
+
+/** Parcels embedded per call when the assistant's index is rebuilt. */
+const REINDEX_PAGE_SIZE = 50;
 
 /** A parcel in one of these states is finished — nothing more to assign. */
 const CLOSED_STATUSES: ParcelStatus[] = [
@@ -911,6 +915,46 @@ export class ParcelService {
   }
 
   /**
+   * Rebuilds the assistant's copy of every parcel from this table. Needed for
+   * parcels indexed before owner ids were stored, and for any that were never
+   * indexed at all — neither is visible to a non-admin until it is rewritten.
+   *
+   * Paged by id so memory stays flat and a parcel created mid-run cannot shift
+   * the pages; each page is one embedding call.
+   */
+  async reindexAll(): Promise<{ indexed: number }> {
+    this.ragService.assertAvailable();
+
+    let indexed = 0;
+    let lastId: string | undefined;
+
+    for (;;) {
+      const page = await this.parcelRepository.find({
+        where: lastId ? { id: MoreThan(lastId) } : {},
+        relations: ['sender', 'receiver', 'deliveryPersonnel', 'statusLogs'],
+        order: { id: 'ASC' },
+        take: REINDEX_PAGE_SIZE,
+      });
+      if (!page.length) break;
+
+      for (const parcel of page) {
+        parcel.statusLogs?.sort(
+          (a, b) => a.createdAt.getTime() - b.createdAt.getTime(),
+        );
+      }
+      await this.ragService.indexParcels(
+        page.map((parcel) => this.toIndexDocument(parcel)),
+      );
+
+      indexed += page.length;
+      lastId = page[page.length - 1].id;
+    }
+
+    this.logger.log(`Re-indexed ${indexed} parcels for the assistant`);
+    return { indexed };
+  }
+
+  /**
    * Fire-and-forget re-index. This used to POST to `/api/rag/index/parcel`
    * over HTTP, which only worked because that route was unauthenticated —
    * guarding it turned the self-call into a 401. Calling `RagService`
@@ -918,9 +962,19 @@ export class ParcelService {
    * failing vector store from failing the parcel write.
    */
   private async triggerParcelIndex(parcel: Parcel): Promise<void> {
-    const latestNote = parcel.statusLogs?.[parcel.statusLogs.length - 1]?.note;
+    try {
+      await this.ragService.indexParcel(this.toIndexDocument(parcel));
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Unknown error';
+      this.logger.warn(
+        `RAG indexing failed for ${parcel.trackingId}: ${message}`,
+      );
+    }
+  }
 
-    const document: ParcelIndexDocument = {
+  /** Expects `statusLogs` oldest first — the note indexed is the latest one. */
+  private toIndexDocument(parcel: Parcel): ParcelIndexDocument {
+    return {
       id: parcel.id,
       trackingCode: parcel.trackingId,
       status: parcel.status,
@@ -928,20 +982,11 @@ export class ParcelService {
       destination: parcel.deliveryAddress,
       recipientName: parcel.receiverName,
       updatedAt: parcel.updatedAt.toISOString(),
-      notes: latestNote,
+      notes: parcel.statusLogs?.[parcel.statusLogs.length - 1]?.note,
       senderId: parcel.sender?.id,
       receiverId: parcel.receiver?.id,
       courierId: parcel.deliveryPersonnel?.id,
     };
-
-    try {
-      await this.ragService.indexParcel(document);
-    } catch (error) {
-      const message = error instanceof Error ? error.message : 'Unknown error';
-      this.logger.warn(
-        `RAG indexing failed for ${parcel.trackingId}: ${message}`,
-      );
-    }
   }
 
   /**
