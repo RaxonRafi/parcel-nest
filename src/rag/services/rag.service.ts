@@ -1,3 +1,4 @@
+import { readFile } from 'fs/promises';
 import {
   Injectable,
   Logger,
@@ -16,8 +17,8 @@ import {
 } from '@langchain/core/runnables';
 import { ChatGroq } from '@langchain/groq';
 import { HuggingFaceInferenceEmbeddings } from '@langchain/community/embeddings/hf';
-import { PDFLoader } from '@langchain/community/document_loaders/fs/pdf';
 import { RecursiveCharacterTextSplitter } from '@langchain/textsplitters';
+import { extractText } from 'unpdf';
 import { Role } from '../../user/types/user.types';
 import {
   ParcelDocument,
@@ -179,8 +180,7 @@ export class RagService implements OnModuleInit {
     metadata: PdfMetadata,
   ): Promise<PdfIngestResult> {
     const store = this.store();
-    const loader = new PDFLoader(filePath);
-    const rawDocs = await loader.load();
+    const rawDocs = await this.loadPdfPages(filePath);
 
     const splitter = new RecursiveCharacterTextSplitter({
       chunkSize: 1000,
@@ -210,6 +210,31 @@ export class RagService implements OnModuleInit {
       `📄 Ingested "${metadata.source}" → ${chunks.length} chunks`,
     );
     return { chunksIndexed: chunks.length };
+  }
+
+  /**
+   * One document per page that has text.
+   *
+   * `unpdf` rather than LangChain's `PDFLoader`: that one goes through
+   * pdf-parse, whose PDF.js build needs the native `@napi-rs/canvas` module at
+   * import time. Vercel's bundle does not carry it, so every upload there
+   * failed with "Failed to load pdf-parse".
+   */
+  private async loadPdfPages(filePath: string): Promise<Document[]> {
+    const { text } = await extractText(
+      new Uint8Array(await readFile(filePath)),
+      { mergePages: false },
+    );
+
+    return text
+      .map(
+        (pageContent, i) =>
+          new Document({
+            pageContent,
+            metadata: { loc: { pageNumber: i + 1 } },
+          }),
+      )
+      .filter((doc) => doc.pageContent.trim().length > 0);
   }
 
   // ─── Delete PDF ───────────────────────────────────────────────────────────
