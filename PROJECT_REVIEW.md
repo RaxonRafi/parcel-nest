@@ -11,7 +11,7 @@ The bugs found in the 2026-10-10 review were fixed the same day on branch
 [`FRONTEND_GUIDE.md`](./FRONTEND_GUIDE.md).
 
 State after the fixes: `npm run lint` clean, `npx tsc --noEmit` clean,
-`nest build` clean, 170 unit tests and 45 e2e tests passing.
+`nest build` clean, 175 unit tests and 47 e2e tests passing.
 
 ### Fixed
 
@@ -68,24 +68,41 @@ State after the fixes: `npm run lint` clean, `npx tsc --noEmit` clean,
   does). `@langchain/textsplitters` declared; `@types/*` moved to dev.
 - Swagger has `Contact` and `Audit` tag descriptions.
 
+**Closed in the follow-up pass (same day)**
+- Both new migrations are applied to the development database and their
+  effects checked: `timestamptz` columns, the two parcel indexes, and no
+  delivered parcel without `deliveredAt`.
+- The `dashboard/trends` SQL was run on real Postgres for 7, 30 and 90 days;
+  the daily totals match the table.
+- The Pinecone paths were run on the real index: per-user filtering, PDF
+  upload, a shorter re-upload replacing the old chunks, and PDF delete.
+- The 4 parcel vectors that existed were given their owner ids.
+- `POST /api/parcels/reindex` (admin) rebuilds every parcel's vector from
+  Postgres, 50 per embedding call.
+- `README.md` brought up to date: `realtime/` and `contact/` in the tree, the
+  deployment note on WebSockets, the `percel-client/` link, and the e2e
+  database (pg-mem, not SQLite).
+- `langchain` and `@langchain/openai` removed from `package.json`; neither was
+  imported. `pdf-parse` had already gone when PDF loading moved to `unpdf`.
+  `@huggingface/inference` stays: the embeddings class loads it at runtime.
+
 ### Still open
 
-- **Run and verify the migrations.** `1787875900000-TimestamptzAndParcelPartyIndexes`
-  and `1787876000000-BackfillDeliveredAt` have not been applied to any database.
-  Try them on a copy first.
-- **Not exercised against live services:** the `dashboard/trends` SQL (pg-mem
-  cannot run it), and the Pinecone paths — per-user filtering, PDF re-upload
-  and delete.
-- **Existing assistant vectors have no owner ids**, so non-admins cannot
-  retrieve their older parcels until those are re-indexed.
+- **The HuggingFace account has no credits left.** Every embedding request
+  answers `402`, so `ask` and `ask/stream` fail on any real question, and PDF
+  upload and parcel indexing fail too. Top the account up or replace
+  `HUGGINGFACE_API_KEY`.
+- **200 of 204 parcels are not in the assistant's index**, so it cannot answer
+  about them for anyone. Call `POST /api/parcels/reindex` once embeddings work
+  again. The route is unit- and e2e-tested but has not completed a live run.
+- **Answer quality with real embeddings is unverified.** The Pinecone checks
+  above used stand-in vectors because of the credit problem; storage,
+  filtering and deletion are confirmed, ranking is not.
+- **Production database:** the migrations were verified on the database in the
+  local `.env` only.
 - **Audit writes stay outside the parcel transaction** on purpose: a failed
-  audit insert must not undo the action it describes.
-- `README.md` is stale in places: the project tree omits `realtime/` and
-  `contact/`, the deployment section says WebSockets are not implemented, and
-  `percel-client/` is linked but is not in this repository. Left untouched.
-- `@langchain/openai`, `langchain`, `@huggingface/inference` and `pdf-parse`
-  are never imported directly. The last two are needed by LangChain loaders at
-  runtime; check the first two before removing.
+  audit insert must not undo the action it describes. Not a defect.
+- `sqlite3` is a dev dependency that nothing imports any more.
 
 ---
 
@@ -128,8 +145,8 @@ State after the fixes: `npm run lint` clean, `npx tsc --noEmit` clean,
 **RAG**
 - Add conversation history; return "no sources" instead of calling the model
   when retrieval is empty; verify PDF magic bytes, not just the client MIME type.
-- Index the seed data, and add a "re-index everything from Postgres" admin
-  action — the current bulk route needs the client to send the documents.
+- Index the seed data (`POST /api/parcels/reindex` now does it on demand), and
+  have that route drop vectors whose parcel no longer exists.
 
 **Platform**
 - Validate env at boot (Joi/zod schema in `ConfigModule`) instead of

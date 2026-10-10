@@ -1,6 +1,10 @@
 import { AuditService } from '../../audit/services/audit.service';
 import { Test, TestingModule } from '@nestjs/testing';
-import { BadRequestException, ForbiddenException } from '@nestjs/common';
+import {
+  BadRequestException,
+  ForbiddenException,
+  ServiceUnavailableException,
+} from '@nestjs/common';
 import { getRepositoryToken } from '@nestjs/typeorm';
 import { ConfigService } from '@nestjs/config';
 import { PasswordResetService } from '../../auth/services/password-reset.service';
@@ -28,6 +32,11 @@ describe('ParcelService — delivery personnel', () => {
   };
   let statusLogRepository: { create: jest.Mock; save: jest.Mock };
   let userService: { findDeliveryPersonnelOrFail: jest.Mock };
+  let ragService: {
+    indexParcel: jest.Mock;
+    indexParcels: jest.Mock;
+    assertAvailable: jest.Mock;
+  };
 
   const courier = {
     id: 'courier-1',
@@ -71,6 +80,11 @@ describe('ParcelService — delivery personnel', () => {
     };
     statusLogRepository = { create: jest.fn((v) => v), save: jest.fn() };
     userService = { findDeliveryPersonnelOrFail: jest.fn() };
+    ragService = {
+      indexParcel: jest.fn(),
+      indexParcels: jest.fn(),
+      assertAvailable: jest.fn(),
+    };
 
     const module: TestingModule = await Test.createTestingModule({
       providers: [
@@ -81,7 +95,7 @@ describe('ParcelService — delivery personnel', () => {
           useValue: statusLogRepository,
         },
         { provide: UserService, useValue: userService },
-        { provide: RagService, useValue: { indexParcel: jest.fn() } },
+        { provide: RagService, useValue: ragService },
         {
           provide: ParcelNotificationService,
           useValue: { notifyStatusChange: jest.fn() },
@@ -442,6 +456,90 @@ describe('ParcelService — delivery personnel', () => {
       await expect(service.cancelParcel('TRK-TEST', sender)).rejects.toThrow(
         /already been picked up/,
       );
+    });
+  });
+
+  describe('reindexAll', () => {
+    const sender = { id: 'sender-1' } as User;
+    const receiver = { id: 'receiver-1' } as User;
+    const log = (note: string, at: string) =>
+      ({ note, createdAt: new Date(at) }) as ParcelStatusLog;
+    const stored = (id: string, overrides: Partial<Parcel> = {}): Parcel =>
+      buildParcel({
+        id,
+        trackingId: `TRK-${id}`,
+        sender,
+        receiver,
+        updatedAt: new Date('2026-10-01T00:00:00Z'),
+        ...overrides,
+      });
+
+    it('sends every parcel to the index with its parties', async () => {
+      parcelRepository.find
+        .mockResolvedValueOnce([
+          stored('a', { deliveryPersonnel: courier }),
+          stored('b'),
+        ])
+        .mockResolvedValueOnce([]);
+
+      await expect(service.reindexAll()).resolves.toEqual({ indexed: 2 });
+
+      expect(ragService.indexParcels).toHaveBeenCalledTimes(1);
+      expect(ragService.indexParcels).toHaveBeenCalledWith([
+        expect.objectContaining({
+          id: 'a',
+          trackingCode: 'TRK-a',
+          senderId: 'sender-1',
+          receiverId: 'receiver-1',
+          courierId: 'courier-1',
+        }),
+        expect.objectContaining({ id: 'b', courierId: undefined }),
+      ]);
+    });
+
+    it('pages on from the last id it saw', async () => {
+      parcelRepository.find
+        .mockResolvedValueOnce([stored('a')])
+        .mockResolvedValueOnce([stored('b')])
+        .mockResolvedValueOnce([]);
+
+      await expect(service.reindexAll()).resolves.toEqual({ indexed: 2 });
+
+      const wheres = parcelRepository.find.mock.calls.map(
+        ([options]: [{ where: { id?: { value: string } } }]) =>
+          options.where.id?.value,
+      );
+      expect(wheres).toEqual([undefined, 'a', 'b']);
+    });
+
+    it('indexes the latest note, whatever order the logs load in', async () => {
+      parcelRepository.find
+        .mockResolvedValueOnce([
+          stored('a', {
+            statusLogs: [
+              log('left the hub', '2026-10-02T00:00:00Z'),
+              log('booked', '2026-10-01T00:00:00Z'),
+            ],
+          }),
+        ])
+        .mockResolvedValueOnce([]);
+
+      await service.reindexAll();
+
+      expect(ragService.indexParcels).toHaveBeenCalledWith([
+        expect.objectContaining({ notes: 'left the hub' }),
+      ]);
+    });
+
+    it('reads nothing when the assistant is switched off', async () => {
+      ragService.assertAvailable.mockImplementation(() => {
+        throw new ServiceUnavailableException();
+      });
+
+      await expect(service.reindexAll()).rejects.toBeInstanceOf(
+        ServiceUnavailableException,
+      );
+      expect(parcelRepository.find).not.toHaveBeenCalled();
     });
   });
 });

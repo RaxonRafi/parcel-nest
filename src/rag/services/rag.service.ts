@@ -287,11 +287,32 @@ export class RagService implements OnModuleInit {
   // ─── Parcel Indexing ──────────────────────────────────────────────────────
 
   async indexParcel(parcel: ParcelDocument): Promise<void> {
+    await this.indexParcels([parcel]);
+  }
+
+  /**
+   * Embeds and upserts a batch in one round trip each. Ids are derived from
+   * the parcel, so indexing the same one again replaces its vector.
+   */
+  async indexParcels(parcels: ParcelDocument[]): Promise<void> {
     // Parcel writes call this on every change; with the assistant switched
     // off there is simply nothing to keep in sync.
-    if (!this.vectorStore) return;
+    if (!this.vectorStore || !parcels.length) return;
 
-    const doc = new Document({
+    await this.vectorStore.addDocuments(
+      parcels.map((parcel) => this.toParcelVector(parcel)),
+      { ids: parcels.map((parcel) => `parcel-${parcel.id}`) },
+    );
+
+    this.logger.log(
+      parcels.length === 1
+        ? `📦 Indexed parcel ${parcels[0].trackingCode}`
+        : `📦 Indexed ${parcels.length} parcels`,
+    );
+  }
+
+  private toParcelVector(parcel: ParcelDocument): Document {
+    return new Document({
       pageContent: `
         Tracking Code: ${parcel.trackingCode}
         Recipient: ${parcel.recipientName}
@@ -312,12 +333,6 @@ export class RagService implements OnModuleInit {
         ...(parcel.courierId ? { courier_id: parcel.courierId } : {}),
       },
     });
-
-    await this.vectorStore.addDocuments([doc], {
-      ids: [`parcel-${parcel.id}`],
-    });
-
-    this.logger.log(`📦 Indexed parcel ${parcel.trackingCode}`);
   }
 
   async reindexParcel(parcel: ParcelDocument): Promise<void> {

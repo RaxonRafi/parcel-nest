@@ -62,7 +62,8 @@ src/
 │   ├── guards/                 # JwtAuthGuard, RolesGuard
 │   ├── constants/  types/  utils/
 ├── mail/                       # SMTP transport + email templates
-├── <feature>/                  # user, auth, token, parcel, dashboard, audit, rag, keep-alive
+├── realtime/                   # Socket.IO gateway + the service that pushes events
+├── <feature>/                  # user, auth, token, parcel, dashboard, audit, rag, contact, keep-alive
 │   ├── controllers/            # HTTP layer only — no business logic
 │   ├── services/               # Business logic; the only place repositories live
 │   ├── entities/               # TypeORM entities owned by this module
@@ -195,6 +196,13 @@ Parcels are re-indexed automatically on create, status change, cancellation,
 delivery confirmation, assignment and block — `ParcelService` calls
 `RagService.indexParcel()` directly.
 
+Answers are scoped to the caller: policy PDFs are open to everyone, a parcel
+only to an admin or to its sender, receiver or courier. Those ids are stored
+with each vector, so a parcel indexed without them is invisible to non-admins.
+`POST /api/parcels/reindex` (admin) rebuilds every parcel's vector from
+Postgres — run it once after changing what is indexed, or to fill an empty
+index.
+
 `POST /api/rag/ask` returns a complete answer; `POST /api/rag/ask/stream`
 returns the same thing as server-sent events, sources first, then tokens.
 
@@ -212,7 +220,7 @@ each call bills an embedding and a completion.
 
 ```bash
 npm test              # unit tests
-npm run test:api      # e2e against in-memory SQLite (no live database)
+npm run test:api      # e2e against in-memory Postgres (pg-mem, no live database)
 ```
 
 ---
@@ -225,9 +233,11 @@ Vercel, configured by `vercel.json`, which builds `src/main.ts` with
 - **`nest build` does not run there**, so the Swagger CLI plugin never applies.
   Schemas come from explicit `@ApiProperty()` decorators, which work in both
   paths. Do not switch to the plugin.
-- **WebSockets cannot work on serverless functions.** For realtime, use Supabase
-  Realtime (the client connects directly) or move the API to a host with
-  persistent processes.
+- **WebSockets cannot work on serverless functions.** Realtime notifications
+  are implemented — a Socket.IO gateway in `src/realtime/` — but a Vercel
+  function cannot hold a connection open, so they only reach clients when the
+  API runs on a host with persistent processes (Render, Railway, a VPS). On
+  Vercel everything else works and the socket simply never connects.
 
 A daily cron hits `/api/keep-alive` so Supabase does not pause the project. It
 authenticates with `CRON_SECRET`, not a user JWT.
@@ -236,11 +246,9 @@ authenticates with `CRON_SECRET`, not a user JWT.
 
 ## 🖥️ Frontend
 
-The Next.js client lives in [`percel-client/`](./percel-client/).
-
-```bash
-cd percel-client && npm install && npm run dev
-```
+The Next.js client is a separate project and is not part of this repository.
+What it needs from this API is in [`FRONTEND_GUIDE.md`](./FRONTEND_GUIDE.md).
+Its one required setting:
 
 ```env
 NEXT_PUBLIC_API_BASE_URL=http://localhost:3000/api
