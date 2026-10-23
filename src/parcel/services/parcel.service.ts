@@ -326,16 +326,16 @@ export class ParcelService {
       throw new BadRequestException('Parcel is blocked');
     }
 
-    if (actor.role === Role.DELIVERY_PERSONNEL) {
-      this.assertCourierMaySetStatus(parcel, payload.status, actor);
-    }
-
     // A failed attempt carries a reason and counts against the limit, so it
     // has its own route rather than being a bare status here.
     if (payload.status === ParcelStatus.FAILED_ATTEMPT) {
       throw new BadRequestException(
         'Record a failed delivery through PATCH /parcels/:trackingId/failed-attempt',
       );
+    }
+
+    if (actor.role === Role.DELIVERY_PERSONNEL) {
+      this.assertCourierMaySetStatus(parcel, payload.status, actor);
     }
 
     this.assertTransitionAllowed(parcel.status, payload.status);
@@ -473,7 +473,7 @@ export class ParcelService {
       : null;
 
     parcel.status = ParcelStatus.FAILED_ATTEMPT;
-    parcel.deliveryAttempts = (parcel.deliveryAttempts ?? 0) + 1;
+    parcel.deliveryAttempts = attemptsSoFar(parcel) + 1;
     parcel.lastFailureReason = payload.reason;
     parcel.rescheduledFor = rescheduledFor;
     parcel.deliveryCodeHash = null;
@@ -1583,7 +1583,7 @@ export class ParcelService {
   }
 
   private assertAttemptsLeft(parcel: Parcel): void {
-    if ((parcel.deliveryAttempts ?? 0) >= this.maxAttempts()) {
+    if (attemptsSoFar(parcel) >= this.maxAttempts()) {
       throw new BadRequestException(
         `Delivery has failed ${parcel.deliveryAttempts} times — return this parcel to its sender`,
       );
@@ -1868,6 +1868,14 @@ export class ParcelService {
 
     throw new Error('Could not allocate a unique tracking id');
   }
+}
+
+/**
+ * Failed attempts as a number. A driver can hand an integer column's default
+ * back as text on a freshly inserted row, and "0" + 1 is "01".
+ */
+function attemptsSoFar(parcel: Parcel): number {
+  return Number(parcel.deliveryAttempts ?? 0);
 }
 
 const TRACKING_ALPHABET = '0123456789ABCDEFGHJKMNPQRSTVWXYZ';
