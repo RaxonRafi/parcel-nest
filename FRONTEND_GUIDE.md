@@ -18,6 +18,7 @@ Sections are ordered by how likely they are to break something that works today.
 - [9. Errors and rate limits](#9-errors-and-rate-limits)
 - [10. Backend steps before the client ships](#10-backend-steps-before-the-client-ships)
 - [11. Second pass: the improvements release](#11-second-pass-the-improvements-release)
+- [12. Core delivery flow](#12-core-delivery-flow)
 
 ---
 
@@ -620,3 +621,39 @@ If a refresh token that was already rotated is presented again, the API ends
 every session in that chain. The client's single-flight refresh already
 prevents this within one tab. Two *tabs* refreshing in the same few seconds
 are tolerated; the loser gets a `401` and the user signs in again in that tab.
+
+---
+
+## 12. Core delivery flow
+
+Failed attempts and returns, the COD ledger, online payment, editing before
+pickup, delivery codes, zones and tiers, pickup windows, labels and invoices,
+and CSV booking. Shapes are in [`API_ENDPOINTS.md`](./API_ENDPOINTS.md); how it
+works is in the README's "Delivery flow" and "Money" sections. The client
+implements all of it (see its README, "The delivery flow, by role").
+
+Nothing that worked before breaks: every new booking field is optional and
+defaults to how parcels were priced before (inside Dhaka, standard). What a
+client has to account for:
+
+- **Three new statuses.** `FAILED_ATTEMPT`, `RETURNING` and
+  `RETURNED_TO_SENDER` (terminal) appear in lists, filters, timelines,
+  notifications and `parcelsByStatus`. Anything keyed by status needs them.
+- **`FAILED_ATTEMPT` is not a `status` value to send.** It has its own route
+  with a reason; sending it to `status` is `400`.
+- **New parcel fields**: `paymentStatus`, `returnFee`, `pickupZone`,
+  `deliveryZone`, `serviceTier`, `pickupWindowStart`, `pickupWindowEnd`,
+  `estimatedDeliveryAt`, `deliveryAttempts`, `lastFailureReason`,
+  `rescheduledFor`. The public tracking response gains `serviceTier`,
+  `estimatedDeliveryAt`, `deliveryAttempts` and `rescheduledFor`.
+- **`FeeBreakdown`** gains `route`, `serviceTier` and `expressFee` — optional,
+  since older parcels lack them.
+- **Delivery proof** takes an optional `deliveryCode`. When the server sets
+  `REQUIRE_DELIVERY_OTP=true` a courier must send it, and cannot set
+  `DELIVERED` through `status`.
+- **A route for the payment result.** SSLCommerz returns the browser to
+  `FRONTEND_URL/payments/result?status=paid|failed|cancelled|review&trackingId=…`.
+- **PDFs need the bearer token**, so open them by fetching the blob and
+  handing it to a new tab rather than linking straight to the URL.
+- **Two new realtime notification types**: `parcel.updated` and
+  `parcel.rescheduled`.

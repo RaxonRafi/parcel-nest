@@ -334,7 +334,15 @@ export class PaymentService {
   /** This API's own public address, for the gateway to call back on. */
   private apiBaseUrl(): string {
     const configured = this.config.get<string>('APP_URL');
+    if (configured) return configured.replace(/\/+$/, '');
+
+    // Vercel names the production domain in every deployment. Without this a
+    // deploy missing APP_URL told the gateway to call back on localhost,
+    // which the payer's browser then tried to reach.
+    const vercelHost = this.config.get<string>('VERCEL_PROJECT_PRODUCTION_URL');
+    if (vercelHost) return `https://${vercelHost.replace(/\/+$/, '')}`;
+
     const port = this.config.get<string>('PORT') ?? '5000';
-    return (configured || `http://localhost:${port}`).replace(/\/+$/, '');
+    return `http://localhost:${port}`;
   }
 }
