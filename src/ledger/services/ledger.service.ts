@@ -156,7 +156,15 @@ export class LedgerService {
     const having = query.outstandingOnly ? 'HAVING SUM(e.amount) <> 0' : '';
 
     const [rows, [{ count }]] = await Promise.all([
-      this.ledgerRepository.query(
+      this.ledgerRepository.query<
+        {
+          userId: string;
+          name: string;
+          email: string;
+          balance: string | number;
+          entries: string | number;
+        }[]
+      >(
         `SELECT u.id AS "userId", u.name AS name, u.email AS email,
                 SUM(e.amount) AS balance, COUNT(*) AS entries
            FROM ledger_entries e
@@ -167,16 +175,8 @@ export class LedgerService {
           ORDER BY SUM(e.amount) DESC, u.name ASC
           LIMIT $2 OFFSET $3`,
         [accountType, query.limit, query.skip],
-      ) as Promise<
-        {
-          userId: string;
-          name: string;
-          email: string;
-          balance: string | number;
-          entries: string | number;
-        }[]
-      >,
-      this.ledgerRepository.query(
+      ),
+      this.ledgerRepository.query<{ count: string | number }[]>(
         `SELECT COUNT(*) AS count FROM (
            SELECT e."accountId" FROM ledger_entries e
             WHERE e."accountType" = $1
@@ -184,7 +184,7 @@ export class LedgerService {
             ${having}
          ) accounts`,
         [accountType],
-      ) as Promise<{ count: string | number }[]>,
+      ),
     ]);
 
     return paginate(

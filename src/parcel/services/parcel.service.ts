@@ -1607,11 +1607,9 @@ export class ParcelService {
     return code;
   }
 
-  /** Mails the code behind the response; only its hash was stored. */
+  /** Mails the code (queued, behind the response); only its hash was stored. */
   private sendDeliveryCode(parcel: Parcel, code: string): void {
-    this.background.run(`Delivery code for ${parcel.trackingId}`, () =>
-      this.notifications.sendDeliveryCode(parcel, code),
-    );
+    this.notifications.sendDeliveryCode(parcel, code);
   }
 
   /**

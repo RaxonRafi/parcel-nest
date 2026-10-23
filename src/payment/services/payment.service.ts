@@ -174,7 +174,7 @@ export class PaymentService {
       // Leave it INITIATED: the IPN, or the sender retrying, will confirm it
       // once the gateway answers again.
       this.logger.warn(
-        `Could not validate ${payment.tranId}: ${error instanceof Error ? error.message : error}`,
+        `Could not validate ${payment.tranId}: ${error instanceof Error ? error.message : String(error)}`,
       );
       return { outcome: 'failed', trackingId };
     }

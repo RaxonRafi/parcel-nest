@@ -43,6 +43,7 @@ export class LedgerEntry {
   })
   amount!: number;
 
+  @Index('IDX_ledger_entries_parcelId')
   @ManyToOne(() => Parcel, { nullable: true, onDelete: 'SET NULL' })
   @JoinColumn({ name: 'parcelId' })
   parcel!: Parcel | null;

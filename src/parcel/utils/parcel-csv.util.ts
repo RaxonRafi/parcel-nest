@@ -47,7 +47,7 @@ export class CsvFormatError extends Error {}
  * order mark (Excel writes one).
  */
 export function parseCsv(input: string): string[][] {
-  const text = input.replace(/^﻿/, '');
+  const text = input.replace(/^\uFEFF/, '');
   const rows: string[][] = [];
   let row: string[] = [];
   let field = '';

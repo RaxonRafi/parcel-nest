@@ -49,9 +49,10 @@ export class ParcelNotificationService {
 
   /**
    * The code the receiver reads out at the door. Sent whatever their email
-   * preference: without it the parcel cannot be handed over.
+   * preference: without it the parcel cannot be handed over. The mail itself
+   * goes out behind the response.
    */
-  async sendDeliveryCode(parcel: Parcel, code: string): Promise<void> {
+  sendDeliveryCode(parcel: Parcel, code: string): void {
     const email = parcel.receiver?.email;
     if (!email) {
       this.logger.warn(
