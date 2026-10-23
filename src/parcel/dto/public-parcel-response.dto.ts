@@ -1,5 +1,5 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
-import { ParcelStatus } from '../types/parcel.types';
+import { ParcelStatus, ServiceTier } from '../types/parcel.types';
 
 export class PublicParcelStatusLogDto {
   @ApiProperty({ enum: ParcelStatus })
@@ -44,6 +44,22 @@ export class PublicParcelResponseDto {
     description: 'Courier first name, or null while unassigned.',
   })
   deliveryPersonnelName!: string | null;
+
+  @ApiProperty({ enum: ServiceTier })
+  serviceTier!: ServiceTier;
+
+  @ApiPropertyOptional({
+    nullable: true,
+    format: 'date-time',
+    description: 'When the parcel is expected at the door.',
+  })
+  estimatedDeliveryAt!: Date | null;
+
+  @ApiProperty({ example: 0, description: 'Failed delivery attempts so far.' })
+  deliveryAttempts!: number;
+
+  @ApiPropertyOptional({ nullable: true, format: 'date-time' })
+  rescheduledFor!: Date | null;
 
   @ApiProperty({ type: [PublicParcelStatusLogDto] })
   statusLogs!: PublicParcelStatusLogDto[];

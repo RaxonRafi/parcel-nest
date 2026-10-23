@@ -2,6 +2,8 @@ import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { Transform, Type } from 'class-transformer';
 import {
   IsEmail,
+  IsEnum,
+  IsISO8601,
   IsNotEmpty,
   IsNumber,
   IsOptional,
@@ -15,6 +17,7 @@ import {
 } from 'class-validator';
 import { PHONE_REGEX } from '../../common/constants/validation.constants';
 import { trimString } from '../../common/utils/trim.transform';
+import { DeliveryZone, ServiceTier } from '../types/parcel.types';
 
 /** One of `receiverId` / `receiverEmail` must be present. */
 export class CreateParcelDto {
@@ -97,4 +100,45 @@ export class CreateParcelDto {
   @Min(0)
   @Max(1_000_000)
   codAmount?: number;
+
+  @ApiPropertyOptional({
+    enum: DeliveryZone,
+    default: DeliveryZone.DHAKA_CITY,
+    description: 'Area the courier collects from. Drives the fee.',
+  })
+  @IsOptional()
+  @IsEnum(DeliveryZone)
+  pickupZone?: DeliveryZone;
+
+  @ApiPropertyOptional({
+    enum: DeliveryZone,
+    default: DeliveryZone.DHAKA_CITY,
+    description: 'Area the parcel is going to. Drives the fee.',
+  })
+  @IsOptional()
+  @IsEnum(DeliveryZone)
+  deliveryZone?: DeliveryZone;
+
+  @ApiPropertyOptional({
+    enum: ServiceTier,
+    default: ServiceTier.STANDARD,
+    description: 'EXPRESS is only offered when neither end is outside Dhaka.',
+  })
+  @IsOptional()
+  @IsEnum(ServiceTier)
+  serviceTier?: ServiceTier;
+
+  @ApiPropertyOptional({
+    format: 'date-time',
+    description:
+      'Start of the pickup slot. Send both ends or neither; the slot may be at most 12 hours long and start within 14 days.',
+  })
+  @IsOptional()
+  @IsISO8601({ strict: true })
+  pickupWindowStart?: string;
+
+  @ApiPropertyOptional({ format: 'date-time' })
+  @IsOptional()
+  @IsISO8601({ strict: true })
+  pickupWindowEnd?: string;
 }

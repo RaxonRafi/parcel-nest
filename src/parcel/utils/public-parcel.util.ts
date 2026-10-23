@@ -25,6 +25,10 @@ export function toPublicParcel(parcel: Parcel): PublicParcel {
     deliveryAddress: toArea(parcel.deliveryAddress),
     description: parcel.description ?? null,
     deliveryPersonnelName: firstName(parcel.deliveryPersonnel?.name),
+    serviceTier: parcel.serviceTier,
+    estimatedDeliveryAt: parcel.estimatedDeliveryAt ?? null,
+    deliveryAttempts: parcel.deliveryAttempts ?? 0,
+    rescheduledFor: parcel.rescheduledFor ?? null,
     statusLogs: (parcel.statusLogs ?? []).map((log) => ({
       status: log.status,
       note: publicNote(log.note),
@@ -72,5 +76,11 @@ export function toArea(address?: string | null): string {
  */
 function publicNote(note?: string | null): string | null {
   if (!note) return null;
-  return note.startsWith('Delivered to ') ? 'Delivered' : note;
+  if (note.startsWith('Delivered to ')) return 'Delivered';
+  // Failed-attempt and reschedule notes carry the courier's or receiver's
+  // own words after " — "; the standard wording before it is safe to show.
+  if (note.startsWith('Delivery attempt ') || note.startsWith('Rescheduled for ')) {
+    return note.split(' — ')[0];
+  }
+  return note;
 }

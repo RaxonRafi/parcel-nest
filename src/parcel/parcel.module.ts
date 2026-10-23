@@ -3,6 +3,7 @@ import { TypeOrmModule } from '@nestjs/typeorm';
 import { AuditRecorderModule } from '../audit/audit-recorder.module';
 import { AccountTokensModule } from '../auth/account-tokens.module';
 import { AccessControlModule } from '../common/access-control.module';
+import { LedgerModule } from '../ledger/ledger.module';
 import { NotificationStoreModule } from '../notification/notification-store.module';
 import { RagModule } from '../rag/rag.module';
 import { RealtimeModule } from '../realtime/realtime.module';
@@ -23,6 +24,9 @@ import { ParcelService } from './services/parcel.service';
     RagModule,
     RealtimeModule,
     NotificationStoreModule,
+    // Every parcel write that moves money posts to the ledger in its own
+    // transaction. LedgerModule knows nothing of ParcelModule: no cycle.
+    LedgerModule,
   ],
   controllers: [ParcelController],
   providers: [ParcelService, ParcelNotificationService],

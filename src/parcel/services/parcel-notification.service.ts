@@ -3,7 +3,10 @@ import { ConfigService } from '@nestjs/config';
 import { randomUUID } from 'crypto';
 import { webBaseUrl } from '../../common/utils/web-url.util';
 import { MailService } from '../../mail/services/mail.service';
-import { parcelStatusEmail } from '../../mail/templates/parcel-status.template';
+import {
+  deliveryCodeEmail,
+  parcelStatusEmail,
+} from '../../mail/templates/parcel-status.template';
 import { NotificationService } from '../../notification/services/notification.service';
 import { RealtimeService } from '../../realtime/realtime.service';
 import { RealtimeNotificationType } from '../../realtime/realtime.types';
@@ -16,8 +19,11 @@ import { ParcelStatus } from '../types/parcel.types';
 const NOTIFIABLE: ParcelStatus[] = [
   ParcelStatus.PICKED_UP,
   ParcelStatus.OUT_FOR_DELIVERY,
+  ParcelStatus.FAILED_ATTEMPT,
+  ParcelStatus.RETURNING,
   ParcelStatus.DELIVERED,
   ParcelStatus.CANCELLED,
+  ParcelStatus.RETURNED_TO_SENDER,
 ];
 
 /**
@@ -41,15 +47,40 @@ export class ParcelNotificationService {
     private readonly userService: UserService,
   ) {}
 
+  /**
+   * The code the receiver reads out at the door. Sent whatever their email
+   * preference: without it the parcel cannot be handed over.
+   */
+  async sendDeliveryCode(parcel: Parcel, code: string): Promise<void> {
+    const email = parcel.receiver?.email;
+    if (!email) {
+      this.logger.warn(
+        `No receiver email for ${parcel.trackingId}; delivery code not sent`,
+      );
+      return;
+    }
+
+    const { subject, html, text } = deliveryCodeEmail({
+      recipientName: parcel.receiverName,
+      trackingId: parcel.trackingId,
+      code,
+      codAmount: parcel.codAmount,
+      trackingUrl: `${webBaseUrl(this.config)}/track/${parcel.trackingId}`,
+    });
+    this.mailService.queue(email, subject, html, text);
+  }
+
   async notifyStatusChange(parcel: Parcel): Promise<void> {
     await this.notifyDashboards(parcel);
 
-    if (!NOTIFIABLE.includes(parcel.status)) {
+    // A note-only change (assignment, block, an edit) leaves the status as
+    // it was; re-sending the status email for it would just be noise.
+    const latestNote = parcel.statusLogs?.[parcel.statusLogs.length - 1]?.note;
+    if (!NOTIFIABLE.includes(parcel.status) || isNoteOnly(latestNote)) {
       return;
     }
 
     const trackingUrl = `${webBaseUrl(this.config)}/track/${parcel.trackingId}`;
-    const latestNote = parcel.statusLogs?.[parcel.statusLogs.length - 1]?.note;
 
     // Both parties care, and they are different people with different names.
     const recipients = [
@@ -158,6 +189,21 @@ export class ParcelNotificationService {
   }
 }
 
+/** Log entries that annotate a parcel without moving it. */
+function isNoteOnly(note?: string | null): boolean {
+  return (
+    !!note &&
+    [
+      'Assigned to',
+      'Unassigned from',
+      'Parcel blocked',
+      'Parcel unblocked',
+      'Booking details updated',
+      'Rescheduled for',
+    ].some((prefix) => note.startsWith(prefix))
+  );
+}
+
 /** Status-log notes are written by `ParcelService`; these prefixes are its. */
 function describeEvent(
   status: ParcelStatus,
@@ -177,6 +223,12 @@ function describeEvent(
   }
   if (note?.startsWith('Parcel unblocked')) {
     return { type: 'parcel.unblocked', title: 'Parcel released' };
+  }
+  if (note === 'Booking details updated') {
+    return { type: 'parcel.updated', title: 'Booking updated' };
+  }
+  if (note?.startsWith('Rescheduled for')) {
+    return { type: 'parcel.rescheduled', title: 'Delivery rescheduled' };
   }
 
   const label = status.toLowerCase().replace(/_/g, ' ');

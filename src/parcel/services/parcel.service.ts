@@ -35,30 +35,60 @@ import { User } from '../../user/entities/user.entity';
 import { RagService } from '../../rag/services/rag.service';
 import { UserService } from '../../user/services/user.service';
 import { Role } from '../../user/types/user.types';
+import { EntityManager } from 'typeorm';
+import { LedgerService } from '../../ledger/services/ledger.service';
+import { LedgerDraft } from '../../ledger/types/ledger.types';
+import {
+  bookingEntries,
+  cancellationEntries,
+  deliveryEntries,
+  repricingEntries,
+  returnEntries,
+} from '../../ledger/utils/ledger.util';
 import { CreateParcelDto } from '../dto/create-parcel.dto';
+import { FailedAttemptDto, RescheduleDeliveryDto } from '../dto/delivery-attempt.dto';
 import { DeliveryProofDto } from '../dto/delivery-proof.dto';
 import { QueryParcelsDto } from '../dto/query-parcels.dto';
 import { QuoteParcelDto } from '../dto/quote-parcel.dto';
+import { UpdateParcelDto } from '../dto/update-parcel.dto';
 import { UpdateParcelStatusDto } from '../dto/update-parcel-status.dto';
 import { ParcelStatusLog } from '../entities/parcel-status-log.entity';
 import { Parcel } from '../entities/parcel.entity';
 import {
   calculateDeliveryFee,
+  calculateReturnFee,
+  estimateDeliveryAt,
+  expressAvailable,
   FeeBreakdown,
+  PricingRates,
   ratesFromEnv,
+  routeFor,
 } from '../utils/pricing.util';
+import {
+  deliveryCodeMatches,
+  generateDeliveryCode,
+  hashDeliveryCode,
+  MAX_DELIVERY_CODE_ATTEMPTS,
+} from '../utils/delivery-code.util';
+import { BulkRow } from '../utils/parcel-csv.util';
+import { renderInvoice, renderLabel } from '../utils/parcel-documents.util';
 import { toPublicParcel } from '../utils/public-parcel.util';
+import { webBaseUrl } from '../../common/utils/web-url.util';
 import { AuditService } from '../../audit/services/audit.service';
 import { AuditAction, AuditTargetType } from '../../audit/types/audit.types';
 import { PasswordResetService } from '../../auth/services/password-reset.service';
 import { ParcelNotificationService } from './parcel-notification.service';
 import { sanitizeParcel, sanitizeParcels } from '../utils/sanitize-parcel.util';
 import {
+  CLOSED_STATUSES,
+  DeliveryFailureReason,
   PARCEL_STATUS_TRANSITIONS,
   ParcelIndexDocument,
   ParcelStats,
   ParcelStatus,
+  PaymentStatus,
   PublicParcel,
+  ServiceTier,
 } from '../types/parcel.types';
 
 const PARCEL_RELATIONS = [
@@ -80,13 +110,50 @@ const LIST_RELATIONS = ['sender', 'receiver', 'deliveryPersonnel'];
 /**
  * Statuses a courier may set on a parcel assigned to them. Cancelling stays
  * with the sender and blocking stays with an admin, so neither appears here.
+ * FAILED_ATTEMPT is a courier's to record too, but through its own route,
+ * because it needs a reason.
  */
 const COURIER_STATUSES: ParcelStatus[] = [
   ParcelStatus.PICKED_UP,
   ParcelStatus.IN_TRANSIT,
   ParcelStatus.OUT_FOR_DELIVERY,
   ParcelStatus.DELIVERED,
+  ParcelStatus.RETURNING,
+  ParcelStatus.RETURNED_TO_SENDER,
 ];
+
+/** Attempts before a parcel must go back, unless MAX_DELIVERY_ATTEMPTS says otherwise. */
+const DEFAULT_MAX_DELIVERY_ATTEMPTS = 3;
+
+/** How far ahead a pickup slot or a reschedule may be booked. */
+const BOOKING_HORIZON_MS = 14 * 86_400_000;
+
+/** Longest pickup slot a sender may ask for. */
+const MAX_PICKUP_WINDOW_MS = 12 * 3_600_000;
+
+/**
+ * Leeway for a slot or reschedule that starts "now": a client clock a few
+ * minutes behind should not see its booking refused.
+ */
+const CLOCK_SKEW_MS = 5 * 60_000;
+
+const FAILURE_LABELS: Record<DeliveryFailureReason, string> = {
+  [DeliveryFailureReason.RECEIVER_UNAVAILABLE]: 'receiver unavailable',
+  [DeliveryFailureReason.RECEIVER_UNREACHABLE]: 'receiver unreachable by phone',
+  [DeliveryFailureReason.WRONG_ADDRESS]: 'address could not be found',
+  [DeliveryFailureReason.REFUSED]: 'receiver refused the parcel',
+  [DeliveryFailureReason.RESCHEDULE_REQUESTED]: 'receiver asked for another day',
+  [DeliveryFailureReason.OTHER]: 'could not be delivered',
+};
+
+/** What `updateParcel` will change, and the fields that move the price. */
+const PRICED_FIELDS = [
+  'weightKg',
+  'codAmount',
+  'pickupZone',
+  'deliveryZone',
+  'serviceTier',
+] as const;
 
 /** Builds the right TypeORM operator for whichever bounds were supplied. */
 function dateRange(from?: string, to?: string): FindOperator<Date> | undefined {
@@ -98,12 +165,6 @@ function dateRange(from?: string, to?: string): FindOperator<Date> | undefined {
 
 /** Parcels embedded per call when the assistant's index is rebuilt. */
 const REINDEX_PAGE_SIZE = 50;
-
-/** A parcel in one of these states is finished — nothing more to assign. */
-const CLOSED_STATUSES: ParcelStatus[] = [
-  ParcelStatus.DELIVERED,
-  ParcelStatus.CANCELLED,
-];
 
 /**
  * Sole owner of the `parcels` / `parcel_status_logs` tables. User lookups are
@@ -123,14 +184,30 @@ export class ParcelService {
     private readonly passwordResetService: PasswordResetService,
     private readonly auditService: AuditService,
     private readonly background: BackgroundService,
+    private readonly ledgerService: LedgerService,
   ) {}
 
-  /** What a parcel of this weight and cash amount would cost to send. */
+  /**
+   * What a parcel would cost to send. Public, and the same calculation
+   * booking uses, so a quote is never a different number from the bill.
+   */
   quote(payload: QuoteParcelDto): FeeBreakdown {
+    const route = routeFor(payload.pickupZone, payload.deliveryZone);
+
+    if (
+      payload.serviceTier === ServiceTier.EXPRESS &&
+      !expressAvailable(route)
+    ) {
+      throw new BadRequestException(
+        'Express delivery is only offered inside Dhaka and its suburbs',
+      );
+    }
+
     return calculateDeliveryFee(
       payload.weightKg ?? 1,
       payload.codAmount ?? 0,
-      ratesFromEnv((key) => this.config.get<string>(key)),
+      this.rates(),
+      payload,
     );
   }
 
@@ -140,6 +217,11 @@ export class ParcelService {
     }
 
     this.userService.assertEmailVerified(sender, 'booking a parcel');
+
+    const pickupWindow = this.parsePickupWindow(
+      payload.pickupWindowStart,
+      payload.pickupWindowEnd,
+    );
 
     const { user: receiver, created: receiverIsNew } =
       await this.resolveReceiver(payload);
@@ -151,7 +233,7 @@ export class ParcelService {
     const weightKg = payload.weightKg ?? 1;
     const codAmount = payload.codAmount ?? 0;
     // Priced here, never taken from the request.
-    const feeBreakdown = this.quote({ weightKg, codAmount });
+    const feeBreakdown = this.quote({ ...payload, weightKg, codAmount });
 
     const parcel = this.parcelRepository.create({
       trackingId: await this.generateTrackingId(),
@@ -168,6 +250,17 @@ export class ParcelService {
       codAmount,
       deliveryFee: feeBreakdown.total,
       feeBreakdown,
+      paymentStatus: codAmount > 0 ? PaymentStatus.NOT_REQUIRED : PaymentStatus.UNPAID,
+      pickupZone: payload.pickupZone,
+      deliveryZone: payload.deliveryZone,
+      serviceTier: payload.serviceTier,
+      pickupWindowStart: pickupWindow?.start ?? null,
+      pickupWindowEnd: pickupWindow?.end ?? null,
+      estimatedDeliveryAt: estimateDeliveryAt(
+        pickupWindow?.end ?? new Date(),
+        feeBreakdown.route!,
+        feeBreakdown.serviceTier,
+      ),
       status: ParcelStatus.PENDING,
       statusLogs: [
         {
@@ -178,7 +271,15 @@ export class ParcelService {
       ],
     });
 
-    const savedParcel = await this.parcelRepository.save(parcel);
+    // The fee is charged in the same commit that books the parcel, so a
+    // parcel can never exist without its charge or the other way round.
+    const savedParcel = await this.parcelRepository.manager.transaction(
+      async (manager) => {
+        const saved = await manager.save(parcel);
+        await this.ledgerService.post(manager, bookingEntries(saved));
+        return saved;
+      },
+    );
     await this.auditService.record({
       actor: sender,
       action: AuditAction.PARCEL_CREATED,
@@ -190,6 +291,8 @@ export class ParcelService {
         weightKg,
         codAmount,
         deliveryFee: feeBreakdown.total,
+        route: feeBreakdown.route,
+        serviceTier: feeBreakdown.serviceTier,
       },
     });
 
@@ -227,6 +330,14 @@ export class ParcelService {
       this.assertCourierMaySetStatus(parcel, payload.status, actor);
     }
 
+    // A failed attempt carries a reason and counts against the limit, so it
+    // has its own route rather than being a bare status here.
+    if (payload.status === ParcelStatus.FAILED_ATTEMPT) {
+      throw new BadRequestException(
+        'Record a failed delivery through PATCH /parcels/:trackingId/failed-attempt',
+      );
+    }
+
     this.assertTransitionAllowed(parcel.status, payload.status);
 
     // A parcel cannot have been collected by nobody. Without this an admin
@@ -237,27 +348,483 @@ export class ParcelService {
       );
     }
 
-    const from = parcel.status;
-    if (payload.status === ParcelStatus.DELIVERED) {
-      this.markDelivered(parcel);
-    } else {
-      parcel.status = payload.status;
+    if (
+      payload.status === ParcelStatus.PICKED_UP &&
+      parcel.paymentStatus === PaymentStatus.UNPAID &&
+      this.flag('REQUIRE_PAYMENT_BEFORE_PICKUP')
+    ) {
+      throw new BadRequestException(
+        'The delivery fee for this prepaid parcel has not been paid yet',
+      );
     }
-    await this.persist(parcel, {
-      status: payload.status,
-      actor,
-      note: payload.note,
-    });
+
+    // The code is what proves a courier stood at the right door; with it
+    // required, a courier can only close a parcel through delivery proof.
+    if (
+      payload.status === ParcelStatus.DELIVERED &&
+      actor.role === Role.DELIVERY_PERSONNEL &&
+      this.flag('REQUIRE_DELIVERY_OTP')
+    ) {
+      throw new BadRequestException(
+        "Submit delivery proof with the receiver's delivery code to mark this parcel delivered",
+      );
+    }
+
+    const from = parcel.status;
+    let ledger: LedgerDraft[] | ((m: EntityManager) => Promise<LedgerDraft[]>) =
+      [];
+    let deliveryCode: string | null = null;
+
+    switch (payload.status) {
+      case ParcelStatus.DELIVERED:
+        ledger = this.markDelivered(parcel);
+        break;
+
+      case ParcelStatus.OUT_FOR_DELIVERY:
+        if (from === ParcelStatus.FAILED_ATTEMPT) {
+          this.assertAttemptsLeft(parcel);
+        }
+        parcel.status = payload.status;
+        // A fresh code every time the parcel heads out: one read out at a
+        // door on Monday is no use on Wednesday.
+        deliveryCode = this.issueDeliveryCode(parcel);
+        parcel.rescheduledFor = null;
+        break;
+
+      case ParcelStatus.RETURNED_TO_SENDER:
+        parcel.status = payload.status;
+        parcel.returnFee = calculateReturnFee(
+          parcel.feeBreakdown,
+          parcel.deliveryFee,
+          this.rates(),
+        );
+        ledger = returnEntries(parcel);
+        break;
+
+      case ParcelStatus.CANCELLED:
+        parcel.status = payload.status;
+        ledger = async (manager) =>
+          cancellationEntries(
+            parcel,
+            await this.ledgerService.feeChargedFor(manager, parcel.id),
+          );
+        break;
+
+      default:
+        parcel.status = payload.status;
+    }
+
+    if (payload.status !== ParcelStatus.OUT_FOR_DELIVERY) {
+      parcel.deliveryCodeHash = null;
+    }
+
+    await this.persist(
+      parcel,
+      { status: payload.status, actor, note: payload.note },
+      ledger,
+    );
     await this.auditService.record({
       actor,
       action: AuditAction.PARCEL_STATUS_CHANGED,
       targetType: AuditTargetType.PARCEL,
       targetId: parcel.trackingId,
       summary: `${from} → ${payload.status}`,
-      metadata: { from, to: payload.status, note: payload.note ?? null },
+      metadata: {
+        from,
+        to: payload.status,
+        note: payload.note ?? null,
+        ...(parcel.returnFee !== null && payload.status === ParcelStatus.RETURNED_TO_SENDER
+          ? { returnFee: parcel.returnFee }
+          : {}),
+      },
+    });
+
+    const fresh = await this.announce(trackingId);
+    if (deliveryCode) {
+      this.sendDeliveryCode(fresh, deliveryCode);
+    }
+    return fresh;
+  }
+
+  /**
+   * The courier was at the door and could not hand the parcel over. Counts
+   * the attempt; the parcel then goes out again (up to the limit) or back
+   * to its sender.
+   */
+  async recordFailedAttempt(
+    trackingId: string,
+    payload: FailedAttemptDto,
+    actor: User,
+  ): Promise<Parcel> {
+    const parcel = await this.findByTrackingIdOrFail(trackingId);
+
+    if (
+      actor.role === Role.DELIVERY_PERSONNEL &&
+      parcel.deliveryPersonnel?.id !== actor.id
+    ) {
+      throw new ForbiddenException('You can only update parcels assigned to you');
+    }
+
+    this.assertNotBlocked(parcel);
+    this.assertTransitionAllowed(parcel.status, ParcelStatus.FAILED_ATTEMPT);
+
+    const rescheduledFor = payload.rescheduledFor
+      ? this.parseFutureDate(payload.rescheduledFor, 'rescheduledFor')
+      : null;
+
+    parcel.status = ParcelStatus.FAILED_ATTEMPT;
+    parcel.deliveryAttempts = (parcel.deliveryAttempts ?? 0) + 1;
+    parcel.lastFailureReason = payload.reason;
+    parcel.rescheduledFor = rescheduledFor;
+    parcel.deliveryCodeHash = null;
+    if (rescheduledFor) {
+      parcel.estimatedDeliveryAt = rescheduledFor;
+    }
+
+    const left = this.maxAttempts() - parcel.deliveryAttempts;
+    const outcome =
+      left > 0
+        ? `${left} attempt${left === 1 ? '' : 's'} left`
+        : 'no attempts left, returning to sender';
+    // The courier's own words follow " — " so the public timeline can drop
+    // them: they tend to say things like "phone off, neighbour says abroad".
+    const note =
+      `Delivery attempt ${parcel.deliveryAttempts} failed: ${FAILURE_LABELS[payload.reason]} (${outcome})` +
+      (payload.note ? ` — ${payload.note}` : '');
+
+    await this.persist(parcel, {
+      status: ParcelStatus.FAILED_ATTEMPT,
+      actor,
+      note,
+    });
+    await this.auditService.record({
+      actor,
+      action: AuditAction.PARCEL_DELIVERY_FAILED,
+      targetType: AuditTargetType.PARCEL,
+      targetId: parcel.trackingId,
+      summary: `Attempt ${parcel.deliveryAttempts}: ${payload.reason}`,
+      metadata: {
+        attempt: parcel.deliveryAttempts,
+        reason: payload.reason,
+        note: payload.note ?? null,
+        rescheduledFor: rescheduledFor?.toISOString() ?? null,
+      },
     });
 
     return this.announce(trackingId);
+  }
+
+  /**
+   * Picks the day for the next attempt after a failed one. The receiver
+   * usually knows best, so they may set it, as may the sender or an admin.
+   */
+  async rescheduleDelivery(
+    trackingId: string,
+    payload: RescheduleDeliveryDto,
+    actor: User,
+  ): Promise<Parcel> {
+    const parcel = await this.findByTrackingIdOrFail(trackingId);
+
+    const mayReschedule =
+      actor.role === Role.ADMIN ||
+      parcel.receiver?.id === actor.id ||
+      parcel.sender?.id === actor.id;
+    if (!mayReschedule) {
+      throw new ForbiddenException(
+        'Only the receiver, the sender or an admin can reschedule a delivery',
+      );
+    }
+
+    this.assertNotBlocked(parcel);
+    if (parcel.status !== ParcelStatus.FAILED_ATTEMPT) {
+      throw new BadRequestException(
+        'Only a parcel whose delivery attempt failed can be rescheduled',
+      );
+    }
+    this.assertAttemptsLeft(parcel);
+
+    const rescheduledFor = this.parseFutureDate(
+      payload.rescheduledFor,
+      'rescheduledFor',
+    );
+    parcel.rescheduledFor = rescheduledFor;
+    parcel.estimatedDeliveryAt = rescheduledFor;
+
+    await this.persist(parcel, {
+      status: parcel.status,
+      actor,
+      note:
+        `Rescheduled for ${rescheduledFor.toISOString().slice(0, 10)}` +
+        (payload.note ? ` — ${payload.note}` : ''),
+    });
+    await this.auditService.record({
+      actor,
+      action: AuditAction.PARCEL_RESCHEDULED,
+      targetType: AuditTargetType.PARCEL,
+      targetId: parcel.trackingId,
+      summary: `Rescheduled for ${rescheduledFor.toISOString()}`,
+      metadata: { rescheduledFor: rescheduledFor.toISOString() },
+    });
+
+    return this.announce(trackingId);
+  }
+
+  /**
+   * Changes a booking before anyone has collected it. The fee is re-priced
+   * from the new values and the difference charged or credited; a parcel
+   * whose fee was already paid online cannot change price, since the money
+   * has moved — that is a cancel and a new booking.
+   */
+  async updateParcel(
+    trackingId: string,
+    payload: UpdateParcelDto,
+    actor: User,
+  ): Promise<Parcel> {
+    const parcel = await this.findByTrackingIdOrFail(trackingId);
+
+    if (actor.role !== Role.ADMIN && parcel.sender?.id !== actor.id) {
+      throw new ForbiddenException('You can only edit your own parcels');
+    }
+
+    this.assertNotBlocked(parcel);
+    if (parcel.status !== ParcelStatus.PENDING) {
+      throw new BadRequestException(
+        'This parcel has already been picked up — contact support to change it',
+      );
+    }
+
+    const changed = (Object.keys(payload) as (keyof UpdateParcelDto)[]).filter(
+      (key) => payload[key] !== undefined,
+    );
+    if (!changed.length) {
+      throw new BadRequestException('Nothing to change');
+    }
+
+    const windowChanged =
+      payload.pickupWindowStart !== undefined ||
+      payload.pickupWindowEnd !== undefined;
+    const pickupWindow = windowChanged
+      ? this.parsePickupWindow(
+          payload.pickupWindowStart ?? parcel.pickupWindowStart?.toISOString(),
+          payload.pickupWindowEnd ?? parcel.pickupWindowEnd?.toISOString(),
+        )
+      : undefined;
+
+    for (const key of [
+      'receiverName',
+      'receiverPhone',
+      'pickupAddress',
+      'deliveryAddress',
+      'description',
+      ...PRICED_FIELDS,
+    ] as const) {
+      if (payload[key] !== undefined) {
+        Object.assign(parcel, { [key]: payload[key] });
+      }
+    }
+    if (pickupWindow !== undefined) {
+      parcel.pickupWindowStart = pickupWindow?.start ?? null;
+      parcel.pickupWindowEnd = pickupWindow?.end ?? null;
+    }
+
+    const previousFee = parcel.deliveryFee;
+    const repriced = PRICED_FIELDS.some((key) => payload[key] !== undefined);
+    if (repriced) {
+      const feeBreakdown = this.quote(parcel);
+
+      if (
+        feeBreakdown.total !== previousFee &&
+        parcel.paymentStatus === PaymentStatus.PAID
+      ) {
+        throw new BadRequestException(
+          'The fee for this parcel is already paid, so its price cannot change — cancel it and book again',
+        );
+      }
+
+      parcel.feeBreakdown = feeBreakdown;
+      parcel.deliveryFee = feeBreakdown.total;
+      if (parcel.paymentStatus !== PaymentStatus.PAID) {
+        parcel.paymentStatus =
+          parcel.codAmount > 0 ? PaymentStatus.NOT_REQUIRED : PaymentStatus.UNPAID;
+      }
+    }
+    if (repriced || windowChanged) {
+      parcel.estimatedDeliveryAt = estimateDeliveryAt(
+        parcel.pickupWindowEnd ?? new Date(),
+        routeFor(parcel.pickupZone, parcel.deliveryZone),
+        parcel.serviceTier,
+      );
+    }
+
+    await this.persist(
+      parcel,
+      { status: parcel.status, actor, note: 'Booking details updated' },
+      repricingEntries(parcel, previousFee),
+    );
+    await this.auditService.record({
+      actor,
+      action: AuditAction.PARCEL_UPDATED,
+      targetType: AuditTargetType.PARCEL,
+      targetId: parcel.trackingId,
+      summary: `Changed ${changed.join(', ')}`,
+      metadata: {
+        changed,
+        ...(parcel.deliveryFee !== previousFee
+          ? { feeFrom: previousFee, feeTo: parcel.deliveryFee }
+          : {}),
+      },
+    });
+
+    return this.announce(trackingId);
+  }
+
+  /**
+   * Sends the receiver a new delivery code — for when the first email went
+   * astray. The old code stops working.
+   */
+  async reissueDeliveryCode(
+    trackingId: string,
+    actor: User,
+  ): Promise<{ message: string }> {
+    const parcel = await this.findByTrackingIdOrFail(trackingId);
+
+    if (actor.role !== Role.ADMIN && parcel.receiver?.id !== actor.id) {
+      throw new ForbiddenException(
+        'Only the receiver can ask for a new delivery code',
+      );
+    }
+    this.assertNotBlocked(parcel);
+    if (parcel.status !== ParcelStatus.OUT_FOR_DELIVERY) {
+      throw new BadRequestException(
+        'A delivery code is only issued while the parcel is out for delivery',
+      );
+    }
+
+    const code = this.issueDeliveryCode(parcel);
+    await this.parcelRepository.update(parcel.id, {
+      deliveryCodeHash: parcel.deliveryCodeHash,
+      deliveryCodeAttempts: 0,
+    });
+    await this.auditService.record({
+      actor,
+      action: AuditAction.DELIVERY_CODE_REISSUED,
+      targetType: AuditTargetType.PARCEL,
+      targetId: parcel.trackingId,
+    });
+
+    this.sendDeliveryCode(parcel, code);
+    return { message: 'A new delivery code has been sent to the receiver' };
+  }
+
+  /**
+   * Called by the payment module, inside its own transaction, once the
+   * gateway has confirmed the money. Idempotent: a parcel already marked
+   * paid is left alone and reported as such.
+   */
+  async markFeePaid(manager: EntityManager, parcelId: string): Promise<boolean> {
+    const result = await manager.update(
+      Parcel,
+      { id: parcelId, paymentStatus: PaymentStatus.UNPAID },
+      { paymentStatus: PaymentStatus.PAID },
+    );
+    return (result.affected ?? 0) > 0;
+  }
+
+  /**
+   * The parcel a sender is about to pay for, after checking it is theirs and
+   * still owes a fee.
+   */
+  async findPayableParcel(trackingId: string, payer: User): Promise<Parcel> {
+    const parcel = await this.findByTrackingIdOrFail(trackingId);
+
+    if (parcel.sender?.id !== payer.id) {
+      throw new ForbiddenException('You can only pay for parcels you sent');
+    }
+    if (parcel.paymentStatus === PaymentStatus.NOT_REQUIRED) {
+      throw new BadRequestException(
+        'This parcel is cash on delivery — its fee comes out of the cash collected',
+      );
+    }
+    if (parcel.paymentStatus === PaymentStatus.PAID) {
+      throw new BadRequestException('This parcel is already paid for');
+    }
+    if (CLOSED_STATUSES.includes(parcel.status)) {
+      throw new BadRequestException(
+        `A ${parcel.status.toLowerCase().replace(/_/g, ' ')} parcel cannot be paid for`,
+      );
+    }
+
+    return parcel;
+  }
+
+  /**
+   * Books every row of a validated booking file. Rows are independent: one
+   * that fails (an address book entry that cannot receive, say) is reported
+   * and the rest still go through.
+   */
+  async bulkCreate(
+    sender: User,
+    rows: BulkRow[],
+  ): Promise<{
+    created: number;
+    failed: number;
+    results: { line: number; trackingId?: string; error?: string }[];
+  }> {
+    const results: { line: number; trackingId?: string; error?: string }[] = [];
+
+    for (const row of rows) {
+      try {
+        const parcel = await this.create(sender, row.dto);
+        results.push({ line: row.line, trackingId: parcel.trackingId });
+      } catch (error) {
+        results.push({
+          line: row.line,
+          error: error instanceof Error ? error.message : 'Could not book',
+        });
+      }
+    }
+
+    const created = results.filter((result) => result.trackingId).length;
+    await this.auditService.record({
+      actor: sender,
+      action: AuditAction.PARCEL_BULK_BOOKED,
+      targetType: AuditTargetType.USER,
+      targetId: sender.id,
+      summary: `Booked ${created} of ${rows.length} parcels from a file`,
+      metadata: { rows: rows.length, created },
+    });
+
+    return { created, failed: rows.length - created, results };
+  }
+
+  /** A printable 4×6 label — for the sender, an admin or the courier. */
+  async labelPdf(trackingId: string, viewer: User): Promise<Buffer> {
+    const parcel = await this.findByTrackingIdOrFail(trackingId);
+
+    const mayPrint =
+      viewer.role === Role.ADMIN ||
+      parcel.sender?.id === viewer.id ||
+      parcel.deliveryPersonnel?.id === viewer.id;
+    if (!mayPrint) {
+      throw new ForbiddenException(
+        'Only the sender, an admin or the assigned courier can print a label',
+      );
+    }
+
+    return renderLabel(parcel, this.trackingUrl(parcel));
+  }
+
+  /** The fee invoice — the sender's and an admin's business only. */
+  async invoicePdf(trackingId: string, viewer: User): Promise<Buffer> {
+    const parcel = await this.findByTrackingIdOrFail(trackingId);
+
+    if (viewer.role !== Role.ADMIN && parcel.sender?.id !== viewer.id) {
+      throw new ForbiddenException(
+        'Only the sender or an admin can download the invoice',
+      );
+    }
+
+    return renderInvoice(parcel, this.trackingUrl(parcel));
   }
 
   /**
@@ -385,11 +952,19 @@ export class ParcelService {
     }
 
     parcel.status = ParcelStatus.CANCELLED;
-    await this.persist(parcel, {
-      status: ParcelStatus.CANCELLED,
-      actor: sender,
-      note: 'Cancelled by sender',
-    });
+    await this.persist(
+      parcel,
+      {
+        status: ParcelStatus.CANCELLED,
+        actor: sender,
+        note: 'Cancelled by sender',
+      },
+      async (manager) =>
+        cancellationEntries(
+          parcel,
+          await this.ledgerService.feeChargedFor(manager, parcel.id),
+        ),
+    );
     await this.auditService.record({
       actor: sender,
       action: AuditAction.PARCEL_CANCELLED,
@@ -411,12 +986,16 @@ export class ParcelService {
     this.assertNotBlocked(parcel);
     this.assertTransitionAllowed(parcel.status, ParcelStatus.DELIVERED);
 
-    this.markDelivered(parcel);
-    await this.persist(parcel, {
-      status: ParcelStatus.DELIVERED,
-      actor: receiver,
-      note: 'Delivery confirmed by receiver',
-    });
+    const ledger = this.markDelivered(parcel);
+    await this.persist(
+      parcel,
+      {
+        status: ParcelStatus.DELIVERED,
+        actor: receiver,
+        note: 'Delivery confirmed by receiver',
+      },
+      ledger,
+    );
     await this.auditService.record({
       actor: receiver,
       action: AuditAction.PARCEL_DELIVERY_CONFIRMED,
@@ -482,9 +1061,10 @@ export class ParcelService {
     receiver: User,
     query: QueryParcelsDto,
   ): Promise<Paginated<Parcel>> {
+    // A parcel on its way back is no longer coming to them.
     return this.findPage(query, {
       receiver: { id: receiver.id },
-      status: Not(In(CLOSED_STATUSES)),
+      status: Not(In([...CLOSED_STATUSES, ParcelStatus.RETURNING])),
     });
   }
 
@@ -537,29 +1117,47 @@ export class ParcelService {
       );
     }
 
-    parcel.deliveryProofImages = payload.images;
-    parcel.deliveryProofNote = payload.note ?? null;
-    parcel.receivedBy = payload.receivedBy ?? parcel.receiverName;
-    parcel.isCodCollected = payload.codCollected ?? parcel.isCodCollected;
-
     // Proof is only meaningful alongside the transition it evidences. A
     // parcel that is already delivered keeps the time it was delivered at;
     // the proof is being attached after the fact.
     const alreadyDelivered = parcel.status === ParcelStatus.DELIVERED;
     if (!alreadyDelivered) {
       this.assertTransitionAllowed(parcel.status, ParcelStatus.DELIVERED);
-    }
-    this.markDelivered(parcel);
 
-    await this.persist(parcel, {
-      status: ParcelStatus.DELIVERED,
-      actor,
-      note:
-        payload.note ??
-        (alreadyDelivered
-          ? 'Proof of delivery added'
-          : `Delivered to ${parcel.receivedBy}`),
-    });
+      // Cash has to end up in somebody's hands on the ledger.
+      if (parcel.codAmount > 0 && !parcel.deliveryPersonnel) {
+        throw new BadRequestException(
+          'Assign the courier who collected the cash before recording delivery',
+        );
+      }
+
+      // Checked last, so a request refused for another reason does not
+      // spend one of the receiver's code attempts.
+      await this.verifyDeliveryCode(parcel, payload.deliveryCode, actor);
+    }
+
+    parcel.deliveryProofImages = payload.images;
+    parcel.deliveryProofNote = payload.note ?? null;
+    parcel.receivedBy = payload.receivedBy ?? parcel.receiverName;
+    parcel.isCodCollected = payload.codCollected ?? parcel.isCodCollected;
+
+    const ledger = this.markDelivered(parcel);
+
+    await this.persist(
+      parcel,
+      {
+        status: ParcelStatus.DELIVERED,
+        actor,
+        note:
+          payload.note ??
+          (alreadyDelivered
+            ? 'Proof of delivery added'
+            : `Delivered to ${parcel.receivedBy}`),
+      },
+      // Money moves once, on the handover itself — not again when proof is
+      // attached to a parcel that was already delivered.
+      alreadyDelivered ? [] : ledger,
+    );
     await this.auditService.record({
       actor,
       action: AuditAction.PARCEL_PROOF_SUBMITTED,
@@ -750,7 +1348,7 @@ export class ParcelService {
     }>(
       `SELECT u.id                                                   AS "courierId",
               u.name                                                 AS "courierName",
-              COUNT(*) FILTER (WHERE p.status NOT IN ('DELIVERED','CANCELLED'))::int AS active,
+              COUNT(*) FILTER (WHERE p.status NOT IN ('DELIVERED','CANCELLED','RETURNED_TO_SENDER'))::int AS active,
               COUNT(*) FILTER (WHERE p.status = 'DELIVERED')::int     AS delivered,
               ROUND(AVG(
                 EXTRACT(EPOCH FROM (p."deliveredAt" - p."createdAt")) / 3600
@@ -778,7 +1376,7 @@ export class ParcelService {
       `SELECT COALESCE(SUM("deliveryFee") FILTER (WHERE status <> 'CANCELLED'), 0)   AS "deliveryFeesBooked",
               COALESCE(SUM("deliveryFee") FILTER (WHERE status = 'DELIVERED'), 0)    AS "deliveryFeesDelivered",
               COALESCE(SUM("codAmount") FILTER (
-                WHERE "isCodCollected" = false AND status NOT IN ('DELIVERED','CANCELLED')
+                WHERE "isCodCollected" = false AND status NOT IN ('DELIVERED','CANCELLED','RETURNED_TO_SENDER','RETURNING')
               ), 0)                                                                  AS "codOutstanding",
               COALESCE(SUM("codAmount") FILTER (WHERE "isCodCollected" = true), 0)   AS "codCollected"
          FROM parcels
@@ -919,7 +1517,7 @@ export class ParcelService {
    * and delivery proof) and they used to disagree: only proof stamped
    * `deliveredAt` and only proof checked that cash had been collected.
    */
-  private markDelivered(parcel: Parcel): void {
+  private markDelivered(parcel: Parcel): LedgerDraft[] {
     if (parcel.codAmount > 0 && !parcel.isCodCollected) {
       throw new BadRequestException(
         `This parcel is cash on delivery (${parcel.codAmount}) — the courier must submit delivery proof with codCollected before it can be marked delivered`,
@@ -928,15 +1526,26 @@ export class ParcelService {
 
     parcel.status = ParcelStatus.DELIVERED;
     parcel.deliveredAt ??= new Date();
+    parcel.deliveryCodeHash = null;
+    parcel.rescheduledFor = null;
+
+    return deliveryEntries(parcel);
   }
 
   /**
-   * Saves a parcel together with the status-log row describing the change, in
-   * one transaction — so a parcel never moves without its timeline entry.
+   * Saves a parcel together with the status-log row describing the change,
+   * and any money the change moves, in one transaction — so a parcel never
+   * moves without its timeline entry or its ledger entries.
+   *
+   * `ledger` may be a function when the entries depend on what is already in
+   * the ledger, so they are read inside the same transaction.
    */
   private async persist(
     parcel: Parcel,
     log: { status: ParcelStatus; actor: User; note?: string },
+    ledger:
+      | LedgerDraft[]
+      | ((manager: EntityManager) => Promise<LedgerDraft[]>) = [],
   ): Promise<void> {
     await this.parcelRepository.manager.transaction(async (manager) => {
       await manager.save(parcel);
@@ -948,7 +1557,165 @@ export class ParcelService {
           note: log.note,
         }),
       );
+
+      const drafts =
+        typeof ledger === 'function' ? await ledger(manager) : ledger;
+      await this.ledgerService.post(
+        manager,
+        drafts.map((draft) => ({ ...draft, createdById: log.actor.id })),
+      );
     });
+  }
+
+  private rates(): PricingRates {
+    return ratesFromEnv((key) => this.config.get<string>(key));
+  }
+
+  private flag(key: string): boolean {
+    return this.config.get<string>(key) === 'true';
+  }
+
+  private maxAttempts(): number {
+    const configured = Number(this.config.get<string>('MAX_DELIVERY_ATTEMPTS'));
+    return Number.isInteger(configured) && configured > 0
+      ? configured
+      : DEFAULT_MAX_DELIVERY_ATTEMPTS;
+  }
+
+  private assertAttemptsLeft(parcel: Parcel): void {
+    if ((parcel.deliveryAttempts ?? 0) >= this.maxAttempts()) {
+      throw new BadRequestException(
+        `Delivery has failed ${parcel.deliveryAttempts} times — return this parcel to its sender`,
+      );
+    }
+  }
+
+  private trackingUrl(parcel: Parcel): string {
+    return `${webBaseUrl(this.config)}/track/${parcel.trackingId}`;
+  }
+
+  /** Server secret the delivery codes are keyed with. */
+  private codeSecret(): string {
+    return this.config.getOrThrow<string>('JWT_ACCESS_SECRET');
+  }
+
+  /** Sets a fresh code on the parcel (unsaved) and returns it in clear. */
+  private issueDeliveryCode(parcel: Parcel): string {
+    const code = generateDeliveryCode();
+    parcel.deliveryCodeHash = hashDeliveryCode(parcel.id, code, this.codeSecret());
+    parcel.deliveryCodeAttempts = 0;
+    return code;
+  }
+
+  /** Mails the code behind the response; only its hash was stored. */
+  private sendDeliveryCode(parcel: Parcel, code: string): void {
+    this.background.run(`Delivery code for ${parcel.trackingId}`, () =>
+      this.notifications.sendDeliveryCode(parcel, code),
+    );
+  }
+
+  /**
+   * Checks the code the courier typed in. A code that is sent is always
+   * checked; a missing one is only refused from a courier, and only when
+   * REQUIRE_DELIVERY_OTP is on. An admin closing a parcel by hand is an
+   * audited override and needs none.
+   *
+   * Wrong guesses are counted outside the delivery's transaction, so a
+   * refused attempt still counts.
+   */
+  private async verifyDeliveryCode(
+    parcel: Parcel,
+    code: string | undefined,
+    actor: User,
+  ): Promise<void> {
+    if (!code) {
+      if (
+        actor.role === Role.DELIVERY_PERSONNEL &&
+        this.flag('REQUIRE_DELIVERY_OTP')
+      ) {
+        throw new BadRequestException(
+          'Ask the receiver for their delivery code and send it as deliveryCode',
+        );
+      }
+      return;
+    }
+
+    const stored = await this.parcelRepository
+      .createQueryBuilder('parcel')
+      .select('parcel.id')
+      .addSelect(['parcel.deliveryCodeHash', 'parcel.deliveryCodeAttempts'])
+      .where('parcel.id = :id', { id: parcel.id })
+      .getOne();
+
+    if (!stored?.deliveryCodeHash) {
+      throw new BadRequestException(
+        'No delivery code is active for this parcel — it is issued when the parcel goes out for delivery',
+      );
+    }
+    if (stored.deliveryCodeAttempts >= MAX_DELIVERY_CODE_ATTEMPTS) {
+      throw new BadRequestException(
+        'Too many wrong codes — the receiver must request a new one',
+      );
+    }
+
+    if (
+      !deliveryCodeMatches(parcel.id, code, stored.deliveryCodeHash, this.codeSecret())
+    ) {
+      const attempts = stored.deliveryCodeAttempts + 1;
+      await this.parcelRepository.update(parcel.id, {
+        deliveryCodeAttempts: attempts,
+      });
+      const left = MAX_DELIVERY_CODE_ATTEMPTS - attempts;
+      throw new BadRequestException(
+        left > 0
+          ? `Wrong delivery code — ${left} attempt${left === 1 ? '' : 's'} left`
+          : 'Wrong delivery code — the receiver must request a new one',
+      );
+    }
+  }
+
+  /** Both ends or neither; the end after the start; within the horizon. */
+  private parsePickupWindow(
+    start?: string | null,
+    end?: string | null,
+  ): { start: Date; end: Date } | null {
+    if (!start && !end) return null;
+    if (!start || !end) {
+      throw new BadRequestException(
+        'Send both pickupWindowStart and pickupWindowEnd, or neither',
+      );
+    }
+
+    const from = this.parseFutureDate(start, 'pickupWindowStart');
+    const to = this.parseFutureDate(end, 'pickupWindowEnd');
+
+    if (to.getTime() <= from.getTime()) {
+      throw new BadRequestException(
+        'pickupWindowEnd must be after pickupWindowStart',
+      );
+    }
+    if (to.getTime() - from.getTime() > MAX_PICKUP_WINDOW_MS) {
+      throw new BadRequestException('A pickup window can be at most 12 hours');
+    }
+
+    return { start: from, end: to };
+  }
+
+  private parseFutureDate(value: string, field: string): Date {
+    const date = new Date(value);
+    const now = Date.now();
+
+    if (Number.isNaN(date.getTime())) {
+      throw new BadRequestException(`${field} is not a valid date`);
+    }
+    if (date.getTime() < now - CLOCK_SKEW_MS) {
+      throw new BadRequestException(`${field} must not be in the past`);
+    }
+    if (date.getTime() > now + BOOKING_HORIZON_MS) {
+      throw new BadRequestException(`${field} must be within the next 14 days`);
+    }
+
+    return date;
   }
 
   private assertCourierMaySetStatus(

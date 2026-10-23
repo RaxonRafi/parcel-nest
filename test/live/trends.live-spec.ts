@@ -43,6 +43,7 @@ describeLive('Dashboard trends against a real Postgres', () => {
       unused,
       unused,
       unused,
+      unused,
     );
   });
 

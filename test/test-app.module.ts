@@ -17,9 +17,11 @@ import { ENTITIES } from '../src/config/database.config';
 import { ContactModule } from '../src/contact/contact.module';
 import { DashboardModule } from '../src/dashboard/dashboard.module';
 import { KeepAliveModule } from '../src/keep-alive/keep-alive.module';
+import { LedgerModule } from '../src/ledger/ledger.module';
 import { MailModule } from '../src/mail/mail.module';
 import { NotificationModule } from '../src/notification/notification.module';
 import { ParcelModule } from '../src/parcel/parcel.module';
+import { PaymentModule } from '../src/payment/payment.module';
 import { RagModule } from '../src/rag/rag.module';
 import { TokenModule } from '../src/token/token.module';
 import { UserModule } from '../src/user/user.module';
@@ -96,6 +98,8 @@ async function createInMemoryDataSource(
     UserModule,
     AuthModule,
     ParcelModule,
+    LedgerModule,
+    PaymentModule,
     NotificationModule,
     DashboardModule,
     AuditModule,

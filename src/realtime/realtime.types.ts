@@ -10,7 +10,9 @@ export type RealtimeNotificationType =
   | 'parcel.assigned'
   | 'parcel.unassigned'
   | 'parcel.blocked'
-  | 'parcel.unblocked';
+  | 'parcel.unblocked'
+  | 'parcel.updated'
+  | 'parcel.rescheduled';
 
 /** Pushed to connected dashboards. Not persisted — a missed push is gone. */
 export interface RealtimeNotification {
