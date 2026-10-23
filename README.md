@@ -2,8 +2,10 @@
 
 NestJS + PostgreSQL backend for a parcel courier service: senders book parcels,
 admins assign couriers, couriers move them through a status machine, receivers
-track them. Plus a RAG assistant that answers questions over uploaded policy
-PDFs and live parcel state.
+track them. Deliveries that fail are retried or returned, the cash couriers
+collect is tracked on a ledger through to the merchant's payout, and prepaid
+fees can be paid online through SSLCommerz. Plus a RAG assistant that answers
+questions over uploaded policy PDFs and live parcel state.
 
 **Full endpoint reference with request/response shapes:
 [`API_ENDPOINTS.md`](./API_ENDPOINTS.md).** Interactive docs at `/api/docs`.
@@ -64,7 +66,7 @@ src/
 ├── common/background/          # Runs work behind the response (mail, indexing, notifications)
 ├── mail/                       # SMTP transport + email templates
 ├── realtime/                   # Socket.IO gateway + the service that pushes events
-├── <feature>/                  # user, auth, token, parcel, notification, dashboard, audit, rag, contact, keep-alive
+├── <feature>/                  # user, auth, token, parcel, ledger, payment, notification, dashboard, audit, rag, contact, keep-alive
 │   ├── controllers/            # HTTP layer only — no business logic
 │   ├── services/               # Business logic; the only place repositories live
 │   ├── entities/               # TypeORM entities owned by this module
@@ -88,10 +90,15 @@ that owns a table calls `TypeOrmModule.forFeature` for it:
 | `audit`  | `audit_logs`                                                 |
 | `notification` | `notifications`                                        |
 | `contact` | `contact_messages`                                          |
+| `ledger` | `ledger_entries`                                             |
+| `payment` | `payments`                                                  |
 
 Everything else asks the owning service. `DashboardService` injects no
 repository at all and composes `UserService.getStats()` with
-`ParcelService.getStats()`.
+`ParcelService.getStats()`. Parcel and payment code never insert ledger rows
+themselves: they build drafts and hand them to `LedgerService.post()` inside
+their own transaction, so a parcel never changes state without its money
+moving in the same commit.
 
 **No circular module imports, no `forwardRef`.** Two splits exist purely to keep
 it that way, and both are worth knowing about before you add an import:
@@ -106,7 +113,8 @@ it that way, and both are worth knowing about before you add an import:
 
 ```
 TokenModule ─┬─> UserModule ─> AccessControlModule ─┬─> AuthModule
-             └────────────────────────────────────  ├─> ParcelModule ─> DashboardModule
+             └────────────────────────────────────  ├─> LedgerModule ─┬─> ParcelModule ─> DashboardModule
+                                                    │                 └─> PaymentModule (also imports ParcelModule)
                                                     ├─> AuditModule
                                                     └─> RagModule
 ```
@@ -164,6 +172,14 @@ npm run migration:generate -- src/database/migrations/AddParcelWeight
 
 For a hand-written one, `npm run migration:create -- src/database/migrations/Name`.
 
+**Migrate before you deploy.** `CoreDeliveryFlow` adds the zone, schedule,
+attempt and payment columns to `parcels` and creates `ledger_entries` and
+`payments`. The current code reads them, so it fails without them; the
+previous code ignores them, so migrating first is safe. It also charges each
+parcel that is still open its booking fee on the ledger, so its cash is paid
+out net of the fee like any parcel booked from now on; finished parcels are
+treated as settled before the ledger existed.
+
 **Connection pooling.** Supabase's session pooler (port `5432`) allows **15
 clients in total** while node-postgres defaults to 10 per instance — a dev
 server plus one script exhausts it, and on Vercel every warm lambda holds its
@@ -190,10 +206,12 @@ runs, and is drained on shutdown.
 
 Sent on: account creation (confirm your email), a parcel booked for an
 unregistered receiver (claim your account), parcel reaching `PICKED_UP` /
-`OUT_FOR_DELIVERY` / `DELIVERED` / `CANCELLED` (unless the user turned
-`emailNotifications` off), a courier application being approved or rejected,
-password reset, and the contact form (to support, with the visitor as
-reply-to).
+`OUT_FOR_DELIVERY` / `FAILED_ATTEMPT` / `RETURNING` / `DELIVERED` /
+`CANCELLED` / `RETURNED_TO_SENDER` (unless the user turned
+`emailNotifications` off), the receiver's **delivery code** each time a parcel
+goes out for delivery (sent regardless — without it the parcel cannot be handed
+over), a courier application being approved or rejected, password reset, and
+the contact form (to support, with the visitor as reply-to).
 
 > Gmail app passwords are displayed in spaced groups of four and rejected unless
 > the spaces are stripped — `MailService` strips them, so paste as shown. Gmail
@@ -202,14 +220,121 @@ reply-to).
 
 ---
 
+## 📦 Delivery flow
+
+```
+PENDING ─> PICKED_UP ─> IN_TRANSIT ─> OUT_FOR_DELIVERY ─> DELIVERED
+                            │                │
+                            │                └─> FAILED_ATTEMPT ─┬─> OUT_FOR_DELIVERY (retry)
+                            │                                    └─> RETURNING
+                            └─────────────────────────────────────> RETURNING ─> RETURNED_TO_SENDER
+
+Any status before DELIVERED / RETURNING can go to CANCELLED.
+```
+
+- **Booking.** The sender gives two zones (`DHAKA_CITY`, `DHAKA_SUBURB`,
+  `OUTSIDE_DHAKA`), a tier (`STANDARD`, or `EXPRESS` on Dhaka routes only) and
+  optionally a pickup window of up to 12 hours within the next 14 days. The
+  parcel gets an `estimatedDeliveryAt`: the end of the window (or booking time)
+  plus 24 h inside the city, 48 h to the suburbs, 72 h nationwide — 8 h and
+  24 h for express.
+- **Editing.** `PATCH /api/parcels/:trackingId` changes anything but the
+  receiver account while the parcel is `PENDING`. A change to weight, cash,
+  zones or tier re-prices it and the difference goes on the sender's ledger.
+  A fee already paid online cannot change.
+- **Failed attempts.** The courier records `FAILED_ATTEMPT` through its own
+  route with a reason (receiver unavailable, refused, wrong address…) and
+  optionally a day to try again; the receiver, sender or an admin can pick or
+  move that day. After `MAX_DELIVERY_ATTEMPTS` (3) the parcel can only go
+  `RETURNING` → `RETURNED_TO_SENDER`. The courier's own note stays off the
+  public tracking page.
+- **Delivery code.** Each time a parcel goes `OUT_FOR_DELIVERY` the receiver is
+  emailed a fresh six-digit code (only its HMAC is stored). A code sent with
+  delivery proof is always checked; after five wrong tries the receiver must
+  ask for a new one. With `REQUIRE_DELIVERY_OTP=true` a courier cannot close a
+  parcel without it.
+- **Documents.** `GET /api/parcels/:trackingId/label` is a 4×6 PDF with a QR
+  code to the tracking page and the cash to collect; `GET
+  /api/parcels/:trackingId/invoice` is the A4 fee invoice. Both are drawn
+  without a PDF library (the built-in Helvetica needs no font files to
+  bundle), which also means Latin-1 text only — Bangla script prints as `?`.
+- **Bulk booking.** `POST /api/parcels/bulk` takes a CSV of up to 500 rows whose
+  columns are the booking fields. Every row is validated first; one bad row
+  books nothing and the response lists the problems by line.
+
+---
+
 ## 💰 Pricing
 
-`deliveryFee` is computed server-side from `weightKg` and `codAmount` — the
-client sends a weight, never a price. Defaults: 60 base covering the first
-kilogram, 25 per additional kilogram rounded up, plus 1% of any cash-on-delivery
-amount, with a 60 minimum. Every rate is env-tunable (`PRICING_*`).
+`deliveryFee` is computed server-side — the client sends a weight, zones and a
+tier, never a price, and `POST /api/parcels/quote` returns the same breakdown
+booking will charge.
 
-Money columns are `numeric(10,2)`, not floating point.
+| | Default | Env |
+|---|---|---|
+| Base fee, inside Dhaka city | 60 | `PRICING_BASE_FEE` |
+| Base fee, either end in the suburbs | 80 | `PRICING_SUBURB_BASE_FEE` |
+| Base fee, either end outside Dhaka | 120 | `PRICING_NATIONAL_BASE_FEE` |
+| Per kilogram beyond the first, rounded up | 25 | `PRICING_PER_KG_FEE`, `PRICING_INCLUDED_KG` |
+| Cash handling, % of the COD amount | 1% | `PRICING_COD_FEE_PERCENT` |
+| Express surcharge | 50 | `PRICING_EXPRESS_FEE` |
+| Return to sender, % of base + weight + express | 50% | `PRICING_RETURN_FEE_PERCENT` |
+| Minimum | 60 | `PRICING_MINIMUM_FEE` |
+
+The breakdown is frozen on the parcel at booking. Money columns are
+`numeric`, not floating point.
+
+---
+
+## 💵 Money: ledger and payments
+
+Every movement of money is one signed row in `ledger_entries`; a balance is the
+sum of an account's rows, and rows are never edited. Two kinds of account:
+
+- **Merchant** (a sender). Positive = the company owes them, negative = they
+  owe the company.
+- **Courier.** Positive = cash collected at the door and not yet handed in.
+
+A 2,000 BDT cash-on-delivery order, 1.5 kg inside Dhaka:
+
+| Event | Merchant | Courier |
+|---|---|---|
+| Booked — fee 60 + 25 + 20 | −105 | |
+| Delivered, cash collected | +2,000 | +2,000 |
+| Courier hands the cash in (`POST /api/ledger/couriers/:id/deposits`) | | −2,000 |
+| Merchant paid out by bKash (`POST /api/ledger/merchants/:id/payouts`) | −1,895 | |
+
+A returned COD parcel gets its 20 cash-handling fee back and is charged the
+return fee instead. Cancelling gives back every fee charged. Deposits and
+payouts are refused above the balance, under a row lock so two admins cannot
+spend the same balance. Senders and couriers read their own statement at
+`GET /api/ledger/me`; admins see every balance at `/api/ledger/merchants` and
+`/api/ledger/couriers`.
+
+**Online payment.** A prepaid parcel's fee can be paid through SSLCommerz
+(cards, bKash, Nagad, internet banking): `POST
+/api/payments/parcels/:trackingId/checkout` returns a gateway URL, and the
+gateway calls back on `APP_URL/api/payments/sslcommerz/{success,fail,cancel,ipn}`.
+Nothing the browser posts back is believed: every success is re-checked with
+SSLCommerz's validation API for transaction id, amount and currency before the
+fee is credited, and the success redirect and the server-to-server IPN credit
+it once between them. The browser then lands on
+`FRONTEND_URL/payments/result?status=paid|failed|cancelled|review`.
+
+```env
+PAYMENT_SSLCOMMERZ_ENABLED=true
+SSLCOMMERZ_STORE_ID=your_store_id
+SSLCOMMERZ_STORE_PASSWORD=your_store_id@ssl
+SSLCOMMERZ_SANDBOX=true          # stays on unless set to false
+APP_URL=https://your-api.example.com
+```
+
+Off unless enabled with both credentials; checkout then answers `503`. The IPN
+cannot reach `localhost`, so locally a payment is confirmed by the browser
+redirect alone. Refunds are not sent through the gateway: a cancelled paid
+parcel's fee goes back on the merchant's balance and leaves with their next
+payout. Set `REQUIRE_PAYMENT_BEFORE_PICKUP=true` to refuse pickup of a prepaid
+parcel whose fee is unpaid.
 
 ---
 
@@ -256,6 +381,11 @@ npm run test:live     # read-only SQL checks against the database in .env
 `test:live` exists because the dashboard trends are hand-written Postgres that
 the in-memory database cannot run. It only reads, and skips itself when no
 database is configured.
+
+`test/delivery-flow.e2e-spec.ts` walks the 2,000 BDT order above end to end —
+booking, the delivery code, cash on the ledger, hand-in and payout — plus
+failed attempts and returns, edits, zones, PDFs, CSV booking and online payment
+against a stand-in gateway.
 
 `.github/workflows/ci.yml` runs lint, type-check, unit and e2e on every push,
 and in a second job applies every migration to a fresh Postgres 16 container
@@ -319,6 +449,6 @@ NEXT_PUBLIC_API_BASE_URL=http://localhost:3000/api
 ```
 
 Client runs on **http://localhost:3001**, API on **http://localhost:3000**.
-Set `FRONTEND_URL` on the API so emailed reset and confirmation links point at
-the client — it needs routes at `/reset-password` and `/verify-email` that read
-`?token=`.
+Set `FRONTEND_URL` on the API so emailed links and the payment redirect point
+at the client — it needs routes at `/reset-password` and `/verify-email` that
+read `?token=`, and `/payments/result` that reads `?status=&trackingId=`.

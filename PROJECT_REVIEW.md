@@ -227,20 +227,57 @@ passing. The client-facing delta is section 11 of
 
 ---
 
-## ✨ Features worth adding
+## 📦 Core delivery flow (2026-10-23)
 
-**Core delivery flow**
-- Online payment for prepaid parcels (SSLCommerz / bKash / Stripe) and a COD
-  settlement ledger: what each courier collected, what is owed to each sender.
-- Failed-attempt, reschedule and return-to-sender statuses — the state machine
-  currently ends at delivered or cancelled.
-- Editing a parcel (address, receiver phone) while it is still `PENDING`.
-- Delivery OTP or QR code confirmed at handover instead of a free "confirm"
-  button.
-- Scheduled pickup windows and an estimated delivery date.
-- Zones / hubs with distance-based pricing, express vs standard tiers.
-- Printable shipping label and invoice PDF with a QR tracking code.
-- Bulk booking by CSV upload for merchants.
+Built on `development`, API and client both. The README's "Delivery flow" and
+"Money" sections describe how it works; this is the record of what was done
+and what was left.
+
+**Done**
+- **Failed attempts and returns.** `FAILED_ATTEMPT`, `RETURNING` and
+  `RETURNED_TO_SENDER`, a reason per attempt, a reschedule the receiver can
+  set, a limit of `MAX_DELIVERY_ATTEMPTS` (3), and a return fee.
+- **COD settlement ledger.** `ledger_entries`: the fee charged at booking, cash
+  into the courier's hands and onto the merchant's balance at delivery,
+  hand-ins and payouts recorded by an admin, refunds on cancel and return —
+  each posted in the same transaction as the parcel change that causes it.
+- **Online payment** of prepaid fees through SSLCommerz, believed only after
+  the gateway's validation API agrees on transaction, amount and currency, and
+  credited once however many callbacks arrive.
+- **Editing before pickup**, re-priced on the ledger; refused once paid online.
+- **Delivery code** emailed to the receiver each time the parcel goes out,
+  HMAC-stored, five tries; required from couriers with
+  `REQUIRE_DELIVERY_OTP=true`.
+- **Pickup windows and an estimated delivery date**, moved by a reschedule.
+- **Zones and tiers.** Three zones, three route prices, express on Dhaka routes.
+- **Label and invoice PDFs** with a QR code to the tracking page.
+- **Bulk CSV booking**, validated whole before anything is booked.
+
+Verified: lint, type-check and build clean; 419 unit tests and 116 e2e tests
+(37 new, in `test/delivery-flow.e2e-spec.ts`). The migration was run up, re-run
+and down inside a rolled-back transaction on the development database: the 79
+open parcels got one opening fee entry each, and nothing remained afterwards.
+The client builds with the new screens.
+
+**Not verified**
+- A real SSLCommerz sandbox payment. The gateway was replaced by a stand-in in
+  the e2e suite; the request shapes follow SSLCommerz's v4 documentation.
+- The new screens clicked through in a browser against a migrated database.
+
+**Left out on purpose**
+- Hubs as their own records and routing between them: zones price the route,
+  but a parcel is not tracked hub to hub.
+- Gateway refunds. A cancelled paid parcel's fee goes back on the merchant's
+  balance and leaves with their next payout.
+- SMS for the delivery code. It goes by email until an SMS provider is chosen
+  (see Communication below) — receivers read SMS far more than email here.
+- Unicode in PDFs. Bangla names print as `?`; it needs an embedded font.
+- An automatic move to `RETURNING` on the last failed attempt: the next step
+  stays explicit, the retry is simply refused.
+
+---
+
+## ✨ Features worth adding
 
 **Couriers**
 - Auto-assignment by zone and current workload; courier availability toggle.
@@ -258,8 +295,8 @@ passing. The client-facing delta is section 11 of
 - Saved address book for senders.
 
 **Communication**
-- SMS / WhatsApp / web-push notifications alongside email.
-- In-app notification inbox backed by a table.
+- SMS / WhatsApp / web-push notifications alongside email — first of all for
+  the delivery code.
 - Support tickets linked to a parcel, replacing the email-only contact form.
 - Bangla / English localisation for emails and API messages.
 

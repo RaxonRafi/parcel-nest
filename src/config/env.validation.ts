@@ -105,7 +105,9 @@ export function validateEnv(env: Env): Env {
     }
     if (!text(env, 'APP_URL')) {
       warnings.push(
-        'APP_URL is empty — SSLCommerz will be told to call back on localhost',
+        text(env, 'VERCEL_PROJECT_PRODUCTION_URL')
+          ? `APP_URL is empty — SSLCommerz will call back on https://${text(env, 'VERCEL_PROJECT_PRODUCTION_URL')}`
+          : 'APP_URL is empty — SSLCommerz will be told to call back on localhost',
       );
     }
     if (

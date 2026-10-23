@@ -95,7 +95,8 @@ type Parcel = {
   pickupAddress: string;
   deliveryAddress: string;
   description: string | null;
-  status: 'PENDING' | 'PICKED_UP' | 'IN_TRANSIT' | 'OUT_FOR_DELIVERY' | 'DELIVERED' | 'CANCELLED';
+  status: 'PENDING' | 'PICKED_UP' | 'IN_TRANSIT' | 'OUT_FOR_DELIVERY' | 'FAILED_ATTEMPT'
+        | 'RETURNING' | 'DELIVERED' | 'CANCELLED' | 'RETURNED_TO_SENDER';
   isBlocked: boolean;
   weightKg: number;               // kilograms
   deliveryFee: number;            // computed server-side, never sent by the client
@@ -106,6 +107,17 @@ type Parcel = {
   deliveryProofNote: string | null;
   receivedBy: string | null;      // who actually took it
   deliveredAt: string | null;
+  paymentStatus: 'NOT_REQUIRED' | 'UNPAID' | 'PAID';  // NOT_REQUIRED = COD, fee comes out of the cash
+  returnFee: number | null;       // charged once RETURNED_TO_SENDER
+  pickupZone: Zone;               // 'DHAKA_CITY' | 'DHAKA_SUBURB' | 'OUTSIDE_DHAKA'
+  deliveryZone: Zone;
+  serviceTier: 'STANDARD' | 'EXPRESS';
+  pickupWindowStart: string | null;
+  pickupWindowEnd: string | null;
+  estimatedDeliveryAt: string | null;  // null on parcels booked before estimates
+  deliveryAttempts: number;       // failed attempts so far
+  lastFailureReason: FailureReason | null;
+  rescheduledFor: string | null;  // when the next attempt is due
   sender: User;
   receiver: User;
   deliveryPersonnel: User | null;   // assigned courier, null until assigned
@@ -121,11 +133,17 @@ type Parcel = {
 };
 
 type FeeBreakdown = {
-  baseFee: number;     // covers the first kilogram
+  route?: 'CITY' | 'SUBURB' | 'NATIONAL';    // absent on parcels booked before zones
+  serviceTier?: 'STANDARD' | 'EXPRESS';
+  baseFee: number;     // by route; covers the first kilogram
   weightFee: number;   // each further kilogram, rounded up
   codFee: number;      // a percentage of the cash to collect
+  expressFee?: number; // flat surcharge for EXPRESS
   total: number;       // equals deliveryFee; never below the minimum fee
 };
+
+type FailureReason = 'RECEIVER_UNAVAILABLE' | 'RECEIVER_UNREACHABLE' | 'WRONG_ADDRESS'
+  | 'REFUSED' | 'RESCHEDULE_REQUESTED' | 'OTHER';
 ```
 
 ### `PublicParcel`
@@ -149,6 +167,10 @@ type PublicParcel = {
   deliveryAddress: string;   // area only
   description: string | null;
   deliveryPersonnelName: string | null;  // courier first name, null if unassigned
+  serviceTier: 'STANDARD' | 'EXPRESS';
+  estimatedDeliveryAt: string | null;
+  deliveryAttempts: number;
+  rescheduledFor: string | null;
   statusLogs: { status: ParcelStatus; note: string | null; createdAt: string }[];
   createdAt: string;
   updatedAt: string;
@@ -286,11 +308,17 @@ one `nidImage` on their profile. Either decision is emailed to the applicant.
 | Role | Method | Endpoint | Response |
 | --- | --- | --- | --- |
 | Public | `GET` | `/api/parcels/:trackingId` | `PublicParcel` — trimmed and masked, see below |
-| Public | `POST` | `/api/parcels/quote` | `FeeBreakdown` — body `{ weightKg?, codAmount? }` |
+| Public | `POST` | `/api/parcels/quote` | `FeeBreakdown` — body `{ weightKg?, codAmount?, pickupZone?, deliveryZone?, serviceTier? }` |
 | Any | `GET` | `/api/parcels/:trackingId/details` | `Parcel` — admin, or the parcel's sender, receiver or courier |
 | SENDER, ADMIN | `POST` | `/api/parcels` | `Parcel` |
 | SENDER, ADMIN | `GET` | `/api/parcels/my-parcels` | `Paginated<Parcel>` — parcels you booked |
 | SENDER, ADMIN | `PATCH` | `/api/parcels/:trackingId/cancel` | `Parcel` — only a parcel you booked |
+| SENDER, ADMIN | `PATCH` | `/api/parcels/:trackingId` | `Parcel` — edit a booking while `PENDING`, see below |
+| SENDER, ADMIN | `POST` | `/api/parcels/bulk` | `{ created, failed, results: { line, trackingId?, error? }[] }` — multipart CSV, see below |
+| Any | `GET` | `/api/parcels/:trackingId/label` | `application/pdf` — the sender, an admin or the assigned courier |
+| Any | `GET` | `/api/parcels/:trackingId/invoice` | `application/pdf` — the sender or an admin |
+| Any | `PATCH` | `/api/parcels/:trackingId/reschedule` | `Parcel` — body `{ rescheduledFor, note? }`; the receiver, sender or an admin, while `FAILED_ATTEMPT` |
+| Any | `POST` | `/api/parcels/:trackingId/delivery-code` | `{ message }` — the receiver, while `OUT_FOR_DELIVERY`: emails a new code |
 | Any | `GET` | `/api/parcels/incoming-parcels` | `Paginated<Parcel>` — addressed to you |
 | Any | `GET` | `/api/parcels/delivery-history` | `Paginated<Parcel>` — by `updatedAt` desc |
 | Any | `PATCH` | `/api/parcels/:trackingId/confirm` | `Parcel` — only the parcel's receiver |
@@ -302,6 +330,7 @@ one `nidImage` on their profile. Either decision is emailed to the applicant.
 | ADMIN | `POST` | `/api/parcels/reindex` | `{ message: string; indexed: number; removed: number }` — rebuilds the assistant index, see [RAG](#rag) |
 | ADMIN, DELIVERY_PERSONNEL | `PATCH` | `/api/parcels/:trackingId/status` | `Parcel` |
 | ADMIN, DELIVERY_PERSONNEL | `PATCH` | `/api/parcels/:trackingId/delivery-proof` | `Parcel` |
+| ADMIN, DELIVERY_PERSONNEL | `PATCH` | `/api/parcels/:trackingId/failed-attempt` | `Parcel` — body `{ reason, note?, rescheduledFor? }`, from `OUT_FOR_DELIVERY` |
 | DELIVERY_PERSONNEL | `GET` | `/api/parcels/assigned-parcels` | `Paginated<Parcel>` — active queue |
 | DELIVERY_PERSONNEL | `GET` | `/api/parcels/completed-deliveries` | `Paginated<Parcel>` — by `updatedAt` desc |
 
@@ -331,7 +360,42 @@ one `nidImage` on their profile. Either decision is emailed to the applicant.
 
 > **Quoting.** `quote` runs the booking calculation without booking anything,
 > so a form can show the price as the weight is typed. Same bounds as booking:
-> `weightKg` 0.01–1000 (default 1), `codAmount` ≥ 0 (default 0).
+> `weightKg` 0.01–1000 (default 1), `codAmount` ≥ 0 (default 0), zones default
+> `DHAKA_CITY`, tier `STANDARD`. `EXPRESS` with either zone `OUTSIDE_DHAKA` is
+> `400`.
+
+> **Booking** also takes `pickupZone`, `deliveryZone`, `serviceTier`, and an
+> optional `pickupWindowStart` / `pickupWindowEnd` (ISO; both or neither, end
+> after start, at most 12 hours, within 14 days — otherwise `400`). The parcel
+> comes back with `estimatedDeliveryAt` and `paymentStatus`.
+
+> **Editing.** `PATCH /api/parcels/:trackingId` takes any booking field except
+> `receiverId` / `receiverEmail`, while the parcel is `PENDING` and not blocked
+> (`400` otherwise; `403` for someone else's parcel). Weight, cash, zones and
+> tier re-price it, and the difference is charged or credited on the ledger;
+> a parcel already `PAID` online cannot change price (`400`).
+
+> **Failed attempts and returns.** `failed-attempt` moves an
+> `OUT_FOR_DELIVERY` parcel to `FAILED_ATTEMPT` and counts it. From there,
+> `status` takes it `OUT_FOR_DELIVERY` again — refused once
+> `MAX_DELIVERY_ATTEMPTS` (3) are used up — or `RETURNING`, then
+> `RETURNED_TO_SENDER`, which sets `returnFee`. `FAILED_ATTEMPT` sent to
+> `status` is `400`. The courier's `note` is kept off the public timeline.
+
+> **Delivery code.** Each move to `OUT_FOR_DELIVERY` emails the receiver a new
+> six-digit code. `delivery-proof` accepts it as `deliveryCode`; when sent it is
+> always checked (`400` with the attempts left; after five wrong tries the
+> receiver must ask for a new one through `delivery-code`). With
+> `REQUIRE_DELIVERY_OTP=true` a courier's proof without a code, and a courier
+> setting `DELIVERED` through `status`, are `400`.
+
+> **Bulk booking.** `multipart/form-data` with `file` (CSV, ≤ 1 MB, ≤ 500 rows,
+> header row of booking field names) and optional `pickupAddress`,
+> `pickupZone`, `pickupWindowStart`, `pickupWindowEnd` applied to rows that
+> leave them empty. Any invalid row: `400` with
+> `errors: { line, errors: string[] }[]` and nothing booked. Rows that pass
+> validation but fail to book (a receiver that cannot receive) are reported in
+> `results` without stopping the rest.
 
 > **Authenticated routes** return the full `Parcel`. Nested users
 > (`sender`, `receiver`, `deliveryPersonnel`, `statusLogs[].changedBy`) come
@@ -345,24 +409,28 @@ one `nidImage` on their profile. Either decision is emailed to the applicant.
 > first name; sender and receiver names to a first name and an initial; the
 > addresses to their area; and a "Delivered to …" note to "Delivered".
 
-> **Pricing.** `deliveryFee` is calculated server-side from `weightKg` and
-> `codAmount` — the client sends weight, never a price. Rates are env-tunable
-> (`PRICING_BASE_FEE`, `PRICING_PER_KG_FEE`, `PRICING_INCLUDED_KG`,
-> `PRICING_COD_FEE_PERCENT`, `PRICING_MINIMUM_FEE`); defaults are a 60 base fee
-> covering the first kg, 25 per additional kg rounded up, plus 1% of any COD
-> amount.
+> **Pricing.** `deliveryFee` is calculated server-side — the client sends
+> weight, zones and tier, never a price. Defaults: a base fee of 60 inside
+> Dhaka city, 80 when either end is in the suburbs, 120 when either is outside
+> Dhaka; 25 per kg beyond the first, rounded up; 1% of any COD amount; 50 for
+> express; a 60 minimum; and a return fee of 50% of base + weight + express.
+> All env-tunable (`PRICING_*`).
 
 > **Proof of delivery.** `delivery-proof` takes `images` (1–5 URLs), optional
 > `receivedBy` and `note`, and `codCollected`. It moves the parcel to
 > `DELIVERED` and stamps `deliveredAt`. A parcel with `codAmount > 0` is
-> refused unless `codCollected` is true. Couriers may only submit for parcels
-> assigned to them.
+> refused unless `codCollected` is true, and one with no courier assigned
+> (the cash must end up in someone's hands on the ledger). Couriers may only
+> submit for parcels assigned to them. Optional `deliveryCode` — see above.
 
 > **Courier rules.** `assign` requires an approved, active
 > `DELIVERY_PERSONNEL` and refuses blocked, delivered or cancelled parcels;
 > re-assigning records a handover. On `status`, an admin may set anything, but a
 > courier may only touch parcels assigned to them and only set `PICKED_UP`,
-> `IN_TRANSIT`, `OUT_FOR_DELIVERY` or `DELIVERED` — anything else is `403`.
+> `IN_TRANSIT`, `OUT_FOR_DELIVERY`, `DELIVERED`, `RETURNING` or
+> `RETURNED_TO_SENDER` — anything else is `403`. With
+> `REQUIRE_PAYMENT_BEFORE_PICKUP=true`, `PICKED_UP` on an `UNPAID` prepaid
+> parcel is `400`.
 > Every assign and unassign appends a status log entry naming the courier.
 > **Nobody can set `PICKED_UP` until a courier is assigned** — `400`.
 
@@ -381,7 +449,8 @@ one `nidImage` on their profile. Either decision is emailed to the applicant.
 | --- | --- |
 | Account created | Confirmation link |
 | Parcel created for an unregistered receiver | Claim-your-account link (a reset grant, valid 7 days — they have no password yet) |
-| Parcel reaches `PICKED_UP`, `OUT_FOR_DELIVERY`, `DELIVERED` or `CANCELLED` | Sender and receiver, unless they set `emailNotifications: false` |
+| Parcel reaches `PICKED_UP`, `OUT_FOR_DELIVERY`, `FAILED_ATTEMPT`, `RETURNING`, `DELIVERED`, `CANCELLED` or `RETURNED_TO_SENDER` | Sender and receiver, unless they set `emailNotifications: false` |
+| Parcel goes `OUT_FOR_DELIVERY`, or the receiver asks again | The receiver's delivery code — sent regardless of `emailNotifications` |
 | `forgot-password` | Reset link, 30 min, single use |
 | Courier application approved or rejected | The applicant |
 | Contact form | Support inbox, with the visitor as reply-to |
@@ -389,6 +458,66 @@ one `nidImage` on their profile. Either decision is emailed to the applicant.
 Intermediate statuses are deliberately silent. Every send is queued behind the
 response: a mail failure is logged and never fails, or slows, the write that
 triggered it.
+
+## Ledger
+
+Money owed between the company, its couriers and its merchants (senders). One
+signed row per movement; a balance is the sum. Merchant: positive is owed to
+them, negative is owed by them. Courier: cash collected and not handed in.
+
+```ts
+type LedgerStatement = {
+  accountType: 'MERCHANT' | 'COURIER';
+  userId: string;
+  name: string;
+  balance: number;
+  entries: Paginated<{
+    id: string;
+    type: 'DELIVERY_FEE' | 'FEE_ADJUSTMENT' | 'FEE_REVERSAL' | 'COD_FEE_REVERSAL'
+        | 'RETURN_FEE' | 'COD_CREDIT' | 'FEE_PAYMENT' | 'PAYOUT'
+        | 'COD_COLLECTED' | 'COD_DEPOSIT';
+    amount: number;          // signed BDT
+    trackingId: string | null;
+    note: string | null;
+    reference: string | null;
+    createdAt: string;
+  }>;
+};
+```
+
+| Role | Method | Endpoint | Response |
+| --- | --- | --- | --- |
+| SENDER, DELIVERY_PERSONNEL, ADMIN | `GET` | `/api/ledger/me` | `LedgerStatement` — a courier's account for couriers, a merchant's for everyone else |
+| ADMIN | `GET` | `/api/ledger/merchants` | `Paginated<{ userId, name, email, balance, entries }>` — `?outstandingOnly=true` |
+| ADMIN | `GET` | `/api/ledger/couriers` | same, for couriers |
+| ADMIN | `GET` | `/api/ledger/merchants/:userId` | `LedgerStatement` |
+| ADMIN | `GET` | `/api/ledger/couriers/:userId` | `LedgerStatement` |
+| ADMIN | `POST` | `/api/ledger/couriers/:userId/deposits` | `LedgerStatement` — body `{ amount, reference?, note? }` |
+| ADMIN | `POST` | `/api/ledger/merchants/:userId/payouts` | `LedgerStatement` — body `{ amount, method: 'BANK' \| 'BKASH' \| 'NAGAD' \| 'CASH', reference?, note? }` |
+
+> Entries are posted by the parcel routes themselves: the fee at booking, the
+> difference on an edit, the fee back on a cancel, the cash to courier and
+> merchant on a COD delivery, the cash fee back and the return fee on a return,
+> and the fee paid online. Deposits and payouts are refused (`400`) above the
+> balance.
+
+## Payments
+
+Online payment of a prepaid parcel's fee through SSLCommerz.
+
+| Role | Method | Endpoint | Response |
+| --- | --- | --- | --- |
+| SENDER, ADMIN | `POST` | `/api/payments/parcels/:trackingId/checkout` | `{ paymentId, tranId, amount, currency, gatewayUrl }` — send the browser to `gatewayUrl` |
+| Any | `GET` | `/api/payments/parcels/:trackingId` | `Payment[]` — the sender or an admin |
+| Gateway | `POST` | `/api/payments/sslcommerz/success` · `fail` · `cancel` | `303` to `FRONTEND_URL/payments/result?status=paid\|failed\|cancelled\|review&trackingId=…` |
+| Gateway | `POST` | `/api/payments/sslcommerz/ipn` | `{ received: true }` |
+
+> `checkout` is `400` for a COD parcel (its fee comes out of the cash), one
+> already paid, or a closed one; `403` for someone else's; `503` when payment is
+> not configured; `502` when the gateway refuses the session. A payment is only
+> credited after SSLCommerz's validation API confirms its transaction id,
+> amount and currency; a payment the gateway flags as risky is held as `REVIEW`
+> and not credited.
 
 ## Dashboard
 
