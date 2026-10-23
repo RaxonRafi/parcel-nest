@@ -447,10 +447,14 @@ describe('Improvements (e2e)', () => {
         .post('/api/parcels/quote')
         .send({ weightKg: 3, codAmount: 500 })
         .expect(201);
+      // No zones sent: priced as a standard delivery inside Dhaka city.
       expect(quote.body).toEqual({
+        route: 'CITY',
+        serviceTier: 'STANDARD',
         baseFee: 60,
         weightFee: 50,
         codFee: 5,
+        expressFee: 0,
         total: 115,
       });
 
