@@ -5,7 +5,9 @@ import { EmailVerification } from '../auth/entities/email-verification.entity';
 import { PasswordReset } from '../auth/entities/password-reset.entity';
 import { RefreshToken } from '../auth/entities/refresh-token.entity';
 import { ContactMessage } from '../contact/entities/contact-message.entity';
+import { LedgerEntry } from '../ledger/entities/ledger-entry.entity';
 import { Notification } from '../notification/entities/notification.entity';
+import { Payment } from '../payment/entities/payment.entity';
 import { AuthProvider } from '../user/entities/auth-provider.entity';
 import { User } from '../user/entities/user.entity';
 import { ParcelStatusLog } from '../parcel/entities/parcel-status-log.entity';
@@ -27,6 +29,8 @@ export const ENTITIES = [
   AuditLog,
   Notification,
   ContactMessage,
+  LedgerEntry,
+  Payment,
 ];
 
 export const MIGRATIONS_DIR = join(__dirname, '..', 'database', 'migrations');

@@ -2,7 +2,13 @@ import { FeeBreakdownDto } from './quote-parcel.dto';
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { PageMetaDto } from '../../common/dto/paginated-response.dto';
 import { UserResponseDto } from '../../user/dto/user-response.dto';
-import { ParcelStatus } from '../types/parcel.types';
+import {
+  DeliveryFailureReason,
+  DeliveryZone,
+  ParcelStatus,
+  PaymentStatus,
+  ServiceTier,
+} from '../types/parcel.types';
 
 export class ParcelStatusLogResponseDto {
   @ApiProperty({ format: 'uuid' })
@@ -83,6 +89,51 @@ export class ParcelResponseDto {
   @ApiProperty({ default: false })
   isCodCollected!: boolean;
 
+  @ApiProperty({
+    enum: PaymentStatus,
+    description:
+      'NOT_REQUIRED for cash on delivery (the fee comes out of the cash); UNPAID or PAID for a prepaid parcel.',
+  })
+  paymentStatus!: PaymentStatus;
+
+  @ApiPropertyOptional({
+    nullable: true,
+    example: 30,
+    description: 'Charged once the parcel is RETURNED_TO_SENDER.',
+  })
+  returnFee!: number | null;
+
+  @ApiProperty({ enum: DeliveryZone })
+  pickupZone!: DeliveryZone;
+
+  @ApiProperty({ enum: DeliveryZone })
+  deliveryZone!: DeliveryZone;
+
+  @ApiProperty({ enum: ServiceTier })
+  serviceTier!: ServiceTier;
+
+  @ApiPropertyOptional({ nullable: true, format: 'date-time' })
+  pickupWindowStart!: Date | null;
+
+  @ApiPropertyOptional({ nullable: true, format: 'date-time' })
+  pickupWindowEnd!: Date | null;
+
+  @ApiPropertyOptional({
+    nullable: true,
+    format: 'date-time',
+    description: 'Null on parcels booked before estimates existed.',
+  })
+  estimatedDeliveryAt!: Date | null;
+
+  @ApiProperty({ example: 0, description: 'Failed attempts so far.' })
+  deliveryAttempts!: number;
+
+  @ApiPropertyOptional({ nullable: true, enum: DeliveryFailureReason })
+  lastFailureReason!: DeliveryFailureReason | null;
+
+  @ApiPropertyOptional({ nullable: true, format: 'date-time' })
+  rescheduledFor!: Date | null;
+
   @ApiProperty({ type: [String], description: 'Proof-of-delivery image URLs.' })
   deliveryProofImages!: string[];
 
@@ -123,6 +174,28 @@ export class PaginatedParcelsDto {
 
   @ApiProperty({ type: PageMetaDto })
   meta!: PageMetaDto;
+}
+
+export class BulkBookingRowResultDto {
+  @ApiProperty({ example: 2, description: 'CSV line number, header is 1.' })
+  line!: number;
+
+  @ApiPropertyOptional({ example: 'TRK-7K2M9QX4T1VB' })
+  trackingId?: string;
+
+  @ApiPropertyOptional({ example: 'That account cannot receive parcels' })
+  error?: string;
+}
+
+export class BulkBookingResponseDto {
+  @ApiProperty({ example: 48 })
+  created!: number;
+
+  @ApiProperty({ example: 2 })
+  failed!: number;
+
+  @ApiProperty({ type: [BulkBookingRowResultDto] })
+  results!: BulkBookingRowResultDto[];
 }
 
 export class ReindexResponseDto {

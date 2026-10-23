@@ -9,6 +9,7 @@ import { getRepositoryToken } from '@nestjs/typeorm';
 import { ConfigService } from '@nestjs/config';
 import { BackgroundService } from '../../common/background/background.service';
 import { PasswordResetService } from '../../auth/services/password-reset.service';
+import { LedgerService } from '../../ledger/services/ledger.service';
 import { RagService } from '../../rag/services/rag.service';
 import { ParcelNotificationService } from './parcel-notification.service';
 import { UserService } from '../../user/services/user.service';
@@ -38,6 +39,12 @@ describe('ParcelService — delivery personnel', () => {
   };
   let auditService: { record: jest.Mock };
   let background: { run: jest.Mock };
+  let ledgerService: { post: jest.Mock; feeChargedFor: jest.Mock };
+  let notifications: {
+    notifyStatusChange: jest.Mock;
+    sendDeliveryCode: jest.Mock;
+  };
+  let config: { get: jest.Mock; getOrThrow: jest.Mock };
   let ragService: {
     indexParcel: jest.Mock;
     indexParcels: jest.Mock;
@@ -64,6 +71,8 @@ describe('ParcelService — delivery personnel', () => {
       status: ParcelStatus.IN_TRANSIT,
       isBlocked: false,
       deliveryPersonnel: null,
+      // Ledger entries are posted against the sender.
+      sender: { id: 'sender-1', name: 'Sam Sender' } as User,
       statusLogs: [],
       ...overrides,
     }) as Parcel;
@@ -93,6 +102,18 @@ describe('ParcelService — delivery personnel', () => {
     auditService = { record: jest.fn() };
     // Indexing and notifying run behind the response; here they just queue.
     background = { run: jest.fn() };
+    ledgerService = {
+      post: jest.fn(),
+      feeChargedFor: jest.fn().mockResolvedValue(0),
+    };
+    notifications = {
+      notifyStatusChange: jest.fn(),
+      sendDeliveryCode: jest.fn(),
+    };
+    config = {
+      get: jest.fn(),
+      getOrThrow: jest.fn().mockReturnValue('test-secret'),
+    };
     ragService = {
       indexParcel: jest.fn(),
       indexParcels: jest.fn(),
@@ -110,14 +131,12 @@ describe('ParcelService — delivery personnel', () => {
         },
         { provide: UserService, useValue: userService },
         { provide: RagService, useValue: ragService },
-        {
-          provide: ParcelNotificationService,
-          useValue: { notifyStatusChange: jest.fn() },
-        },
-        { provide: ConfigService, useValue: { get: jest.fn() } },
+        { provide: ParcelNotificationService, useValue: notifications },
+        { provide: ConfigService, useValue: config },
         { provide: PasswordResetService, useValue: { issueClaim: jest.fn() } },
         { provide: AuditService, useValue: auditService },
         { provide: BackgroundService, useValue: background },
+        { provide: LedgerService, useValue: ledgerService },
       ],
     }).compile();
 
@@ -527,6 +546,9 @@ describe('ParcelService — delivery personnel', () => {
     it('prices with the same calculation booking uses', () => {
       // Defaults: 60 covers the first kg, 25 per extra kg, 1% of the cash.
       expect(service.quote({ weightKg: 3, codAmount: 500 })).toEqual({
+        route: 'CITY',
+        serviceTier: 'STANDARD',
+        expressFee: 0,
         baseFee: 60,
         weightFee: 50,
         codFee: 5,

@@ -94,6 +94,35 @@ export function validateEnv(env: Env): Env {
     );
   }
 
+  if (text(env, 'PAYMENT_SSLCOMMERZ_ENABLED') === 'true') {
+    const missing = ['SSLCOMMERZ_STORE_ID', 'SSLCOMMERZ_STORE_PASSWORD'].filter(
+      (key) => !text(env, key),
+    );
+    if (missing.length) {
+      warnings.push(
+        `Online payment is enabled but ${missing.join(' and ')} ${missing.length > 1 ? 'are' : 'is'} empty, so it stays off`,
+      );
+    }
+    if (!text(env, 'APP_URL')) {
+      warnings.push(
+        'APP_URL is empty — SSLCommerz will be told to call back on localhost',
+      );
+    }
+    if (
+      text(env, 'NODE_ENV') === 'production' &&
+      text(env, 'SSLCOMMERZ_SANDBOX') !== 'false'
+    ) {
+      warnings.push(
+        'SSLCommerz is in sandbox mode — set SSLCOMMERZ_SANDBOX=false to take real payments',
+      );
+    }
+  }
+
+  const attempts = text(env, 'MAX_DELIVERY_ATTEMPTS');
+  if (attempts && !(Number.isInteger(Number(attempts)) && Number(attempts) > 0)) {
+    problems.push('MAX_DELIVERY_ATTEMPTS must be a positive whole number');
+  }
+
   if (text(env, 'NODE_ENV') === 'production' && !text(env, 'CORS_ORIGIN')) {
     warnings.push(
       'CORS_ORIGIN is empty — the built-in development origins are being used',

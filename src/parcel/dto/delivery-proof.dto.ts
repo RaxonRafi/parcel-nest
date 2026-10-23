@@ -8,6 +8,7 @@ import {
   IsOptional,
   IsString,
   IsUrl,
+  Matches,
   MaxLength,
 } from 'class-validator';
 import { trimString } from '../../common/utils/trim.transform';
@@ -46,4 +47,13 @@ export class DeliveryProofDto {
   @IsOptional()
   @IsBoolean()
   codCollected?: boolean;
+
+  @ApiPropertyOptional({
+    example: '482913',
+    description:
+      'The six-digit code the receiver was sent when the parcel went out for delivery. Checked whenever it is sent; required from couriers when the server sets REQUIRE_DELIVERY_OTP=true.',
+  })
+  @IsOptional()
+  @Matches(/^\d{6}$/, { message: 'deliveryCode must be six digits' })
+  deliveryCode?: string;
 }

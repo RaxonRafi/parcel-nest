@@ -1,5 +1,5 @@
 import { INestApplication } from '@nestjs/common';
-import { Test, TestingModule } from '@nestjs/testing';
+import { Test, TestingModule, TestingModuleBuilder } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
 import * as bcrypt from 'bcryptjs';
 import { Server } from 'http';
@@ -31,10 +31,16 @@ export interface SeededUsers {
   courier: SeededUser;
 }
 
-export async function createTestApp(): Promise<INestApplication> {
-  const moduleFixture: TestingModule = await Test.createTestingModule({
-    imports: [TestAppModule],
-  }).compile();
+/**
+ * `customise` can swap providers before the app compiles — how a test puts
+ * a stand-in where a third-party gateway would be.
+ */
+export async function createTestApp(
+  customise: (builder: TestingModuleBuilder) => TestingModuleBuilder = (b) => b,
+): Promise<INestApplication> {
+  const moduleFixture: TestingModule = await customise(
+    Test.createTestingModule({ imports: [TestAppModule] }),
+  ).compile();
 
   const app = moduleFixture.createNestApplication();
   configureApp(app);

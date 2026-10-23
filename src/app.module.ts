@@ -14,9 +14,11 @@ import { AuthModule } from './auth/auth.module';
 import { ContactModule } from './contact/contact.module';
 import { DashboardModule } from './dashboard/dashboard.module';
 import { KeepAliveModule } from './keep-alive/keep-alive.module';
+import { LedgerModule } from './ledger/ledger.module';
 import { MailModule } from './mail/mail.module';
 import { NotificationModule } from './notification/notification.module';
 import { ParcelModule } from './parcel/parcel.module';
+import { PaymentModule } from './payment/payment.module';
 import { RagModule } from './rag/rag.module';
 import { TokenModule } from './token/token.module';
 import { UserModule } from './user/user.module';
@@ -38,6 +40,8 @@ import { UserModule } from './user/user.module';
     UserModule,
     AuthModule,
     ParcelModule,
+    LedgerModule,
+    PaymentModule,
     NotificationModule,
     DashboardModule,
     AuditModule,

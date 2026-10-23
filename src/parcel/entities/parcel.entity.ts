@@ -11,7 +11,13 @@ import {
 import { User } from '../../user/entities/user.entity';
 import { ParcelStatusLog } from './parcel-status-log.entity';
 import { numericTransformer } from '../../common/utils/numeric.transformer';
-import { ParcelStatus } from '../types/parcel.types';
+import {
+  DeliveryFailureReason,
+  DeliveryZone,
+  ParcelStatus,
+  PaymentStatus,
+  ServiceTier,
+} from '../types/parcel.types';
 import { FeeBreakdown } from '../utils/pricing.util';
 
 @Entity('parcels')
@@ -108,6 +114,69 @@ export class Parcel {
 
   @Column({ default: false })
   isCodCollected!: boolean;
+
+  /**
+   * How the fee is settled — see `PaymentStatus`. Follows `codAmount` until
+   * the sender pays online, after which the price is frozen.
+   */
+  @Column({ type: 'varchar', length: 16, default: PaymentStatus.UNPAID })
+  paymentStatus!: PaymentStatus;
+
+  /** Charged when the parcel reached RETURNED_TO_SENDER; null otherwise. */
+  @Column({
+    type: 'numeric',
+    precision: 10,
+    scale: 2,
+    nullable: true,
+    transformer: numericTransformer,
+  })
+  returnFee!: number | null;
+
+  // ── Route and schedule ────────────────────────────────────────────────────
+  // Zones default to inside Dhaka, which prices exactly as a parcel booked
+  // before zones existed did.
+
+  @Column({ type: 'varchar', length: 16, default: DeliveryZone.DHAKA_CITY })
+  pickupZone!: DeliveryZone;
+
+  @Column({ type: 'varchar', length: 16, default: DeliveryZone.DHAKA_CITY })
+  deliveryZone!: DeliveryZone;
+
+  @Column({ type: 'varchar', length: 16, default: ServiceTier.STANDARD })
+  serviceTier!: ServiceTier;
+
+  /** When the sender wants the courier to come. Both null without a slot. */
+  @Column({ type: 'timestamptz', nullable: true })
+  pickupWindowStart!: Date | null;
+
+  @Column({ type: 'timestamptz', nullable: true })
+  pickupWindowEnd!: Date | null;
+
+  /** Recomputed on edit and moved to the new day on a reschedule. */
+  @Column({ type: 'timestamptz', nullable: true })
+  estimatedDeliveryAt!: Date | null;
+
+  // ── Delivery attempts ─────────────────────────────────────────────────────
+
+  @Column({ type: 'int', default: 0 })
+  deliveryAttempts!: number;
+
+  @Column({ type: 'varchar', length: 32, nullable: true })
+  lastFailureReason!: DeliveryFailureReason | null;
+
+  @Column({ type: 'timestamptz', nullable: true })
+  rescheduledFor!: Date | null;
+
+  /**
+   * Hash of the code the receiver gives the courier at the door. A fresh code
+   * is issued each time the parcel goes out for delivery. Never leaves the API.
+   */
+  @Column({ type: 'varchar', length: 128, nullable: true, select: false })
+  deliveryCodeHash!: string | null;
+
+  /** Wrong codes entered against the current one. Never leaves the API. */
+  @Column({ type: 'int', default: 0, select: false })
+  deliveryCodeAttempts!: number;
 
   // ── Proof of delivery ─────────────────────────────────────────────────────
 
